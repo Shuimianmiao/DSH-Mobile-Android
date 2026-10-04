@@ -19,8 +19,14 @@ import java.util.List;
  *
  * <p>官方留的唯一口子是 {@code <activity-alias>}：预先声明若干个桌面入口、
  * 每个带不同图标，运行时用 {@link PackageManager#setComponentEnabledSetting}
- * 只启用其中一个。所以这里做的是"预置 8 套配色，用户选一套"。
- * 8 套共用同一张前景图（那只鲸鱼），只换背景色 —— 不用多打包一张图。
+ * 只启用其中一个。所以这里做的是"预置一套，用户选一套"。
+ *
+ * <p>可选的有两类：
+ * <ul>
+ *   <li>{@link #GROUP_COLOR}：8 套配色，共用同一张前景图（那只鲸鱼），只换背景色；</li>
+ *   <li>{@link #GROUP_UU}：群里 uu 们投稿的图（26 张），由
+ *       {@code tools/make-user-icons.ps1} 在打包时转成图标资源。</li>
+ * </ul>
  *
  * <h3>两个坑</h3>
  * <ol>
@@ -35,17 +41,25 @@ public final class IconSwitcher {
     private static final String TAG = "DSH_ICON";
     private static final String KEY = "icon_variant";
 
-    /** 一套配色。 */
+    /** 分组名：预置配色。 */
+    public static final String GROUP_COLOR = "配色";
+    /** 分组名：用户投稿的图片。 */
+    public static final String GROUP_UU = "uu们添加的图标";
+
+    /** 一套配色（或一张用户投稿的图）。 */
     public static final class Variant {
         public final String id;
         public final String label;
         public final String alias;        // 完整的组件名
+        /** 所属分组，见 {@link #GROUP_COLOR} / {@link #GROUP_UU}。 */
+        public final String group;
         public final int bgColorRes;
         public final int accentColorRes;
 
-        Variant(String id, String label, String alias, int bg, int accent) {
+        Variant(String id, String label, String group, String alias, int bg, int accent) {
             this.id = id;
             this.label = label;
+            this.group = group;
             this.alias = alias;
             this.bgColorRes = bg;
             this.accentColorRes = accent;
@@ -59,27 +73,69 @@ public final class IconSwitcher {
 
     private static List<Variant> sAll;
 
-    /** 全部可选配色。加一套的话：这里 + manifest 的 activity-alias + 两个 XML 资源。 */
+    /**
+     * 全部可选项，**按分组连续排列**（界面按 group 变化切小标题）。
+     *
+     * <p>加一项的话：这里 + manifest 的 activity-alias + 资源。
+     * 用户投稿的图还要先过一遍 {@code tools/make-user-icons.ps1}。
+     */
     public static synchronized List<Variant> all(Context c) {
         if (sAll == null) {
             String p = c.getPackageName();
             List<Variant> l = new ArrayList<>();
-            l.add(v(c, "white", "经典白", p, R.color.icon_bg_white, R.color.icon_accent_white));
-            l.add(v(c, "sky", "天空蓝", p, R.color.icon_bg_sky, R.color.icon_accent_sky));
-            l.add(v(c, "mint", "薄荷绿", p, R.color.icon_bg_mint, R.color.icon_accent_mint));
-            l.add(v(c, "lilac", "淡紫", p, R.color.icon_bg_lilac, R.color.icon_accent_lilac));
-            l.add(v(c, "peach", "暖橙", p, R.color.icon_bg_peach, R.color.icon_accent_peach));
-            l.add(v(c, "forest", "松林绿", p, R.color.icon_bg_forest, R.color.icon_accent_forest));
-            l.add(v(c, "navy", "深空蓝", p, R.color.icon_bg_navy, R.color.icon_accent_navy));
-            l.add(v(c, "ink", "墨黑", p, R.color.icon_bg_ink, R.color.icon_accent_ink));
+            // ── 预置配色：同一只鲸鱼，换背景色 ──
+            l.add(v(c, "white", "经典白", GROUP_COLOR, p, R.color.icon_bg_white, R.color.icon_accent_white));
+            l.add(v(c, "sky", "天空蓝", GROUP_COLOR, p, R.color.icon_bg_sky, R.color.icon_accent_sky));
+            l.add(v(c, "mint", "薄荷绿", GROUP_COLOR, p, R.color.icon_bg_mint, R.color.icon_accent_mint));
+            l.add(v(c, "lilac", "淡紫", GROUP_COLOR, p, R.color.icon_bg_lilac, R.color.icon_accent_lilac));
+            l.add(v(c, "peach", "暖橙", GROUP_COLOR, p, R.color.icon_bg_peach, R.color.icon_accent_peach));
+            l.add(v(c, "forest", "松林绿", GROUP_COLOR, p, R.color.icon_bg_forest, R.color.icon_accent_forest));
+            l.add(v(c, "navy", "深空蓝", GROUP_COLOR, p, R.color.icon_bg_navy, R.color.icon_accent_navy));
+            l.add(v(c, "ink", "墨黑", GROUP_COLOR, p, R.color.icon_bg_ink, R.color.icon_accent_ink));
+            // ── 用户投稿（群里 uu 们发来的图，见 tools/make-user-icons.ps1）──
+            l.add(v(c, "uu01", "四格·大胆孝", GROUP_UU, p, R.color.icon_bg_uu01, R.color.icon_accent_white));
+            l.add(v(c, "uu02", "蒲公英", GROUP_UU, p, R.color.icon_bg_uu02, R.color.icon_accent_white));
+            l.add(v(c, "uu03", "上菜了", GROUP_UU, p, R.color.icon_bg_uu03, R.color.icon_accent_white));
+            l.add(v(c, "uu04", "震撼美味", GROUP_UU, p, R.color.icon_bg_uu04, R.color.icon_accent_white));
+            l.add(v(c, "uu05", "劣等模型", GROUP_UU, p, R.color.icon_bg_uu05, R.color.icon_accent_white));
+            l.add(v(c, "uu06", "蓝发女仆", GROUP_UU, p, R.color.icon_bg_uu06, R.color.icon_accent_white));
+            l.add(v(c, "uu07", "红星19", GROUP_UU, p, R.color.icon_bg_uu07, R.color.icon_accent_white));
+            l.add(v(c, "uu08", "傻笑鲸鱼", GROUP_UU, p, R.color.icon_bg_uu08, R.color.icon_accent_white));
+            l.add(v(c, "uu09", "黑白鲸鱼", GROUP_UU, p, R.color.icon_bg_uu09, R.color.icon_accent_white));
+            l.add(v(c, "uu10", "Q版女仆", GROUP_UU, p, R.color.icon_bg_uu10, R.color.icon_accent_white));
+            l.add(v(c, "uu11", "蓝紫少女", GROUP_UU, p, R.color.icon_bg_uu11, R.color.icon_accent_white));
+            l.add(v(c, "uu12", "弱小可怜但能吃", GROUP_UU, p, R.color.icon_bg_uu12, R.color.icon_accent_white));
+            l.add(v(c, "uu13", "哦鲸鲸…", GROUP_UU, p, R.color.icon_bg_uu13, R.color.icon_accent_white));
+            l.add(v(c, "uu14", "太有魅力了", GROUP_UU, p, R.color.icon_bg_uu14, R.color.icon_accent_white));
+            l.add(v(c, "uu15", "我不是安卓AI！", GROUP_UU, p, R.color.icon_bg_uu15, R.color.icon_accent_white));
+            l.add(v(c, "uu16", "紫猫猫叠叠乐", GROUP_UU, p, R.color.icon_bg_uu16, R.color.icon_accent_white));
+            l.add(v(c, "uu17", "所以呢", GROUP_UU, p, R.color.icon_bg_uu17, R.color.icon_accent_white));
+            l.add(v(c, "uu18", "爱希娜大哭？", GROUP_UU, p, R.color.icon_bg_uu18, R.color.icon_accent_white));
+            l.add(v(c, "uu19", "委屈", GROUP_UU, p, R.color.icon_bg_uu19, R.color.icon_accent_white));
+            l.add(v(c, "uu20", "吃惊", GROUP_UU, p, R.color.icon_bg_uu20, R.color.icon_accent_white));
+            l.add(v(c, "uu21", "这种可爱多搞点", GROUP_UU, p, R.color.icon_bg_uu21, R.color.icon_accent_white));
+            l.add(v(c, "uu22", "无语", GROUP_UU, p, R.color.icon_bg_uu22, R.color.icon_accent_white));
+            l.add(v(c, "uu23", "开心", GROUP_UU, p, R.color.icon_bg_uu23, R.color.icon_accent_white));
+            l.add(v(c, "uu24", "害羞", GROUP_UU, p, R.color.icon_bg_uu24, R.color.icon_accent_white));
+            l.add(v(c, "uu25", "嫌弃", GROUP_UU, p, R.color.icon_bg_uu25, R.color.icon_accent_white));
+            l.add(v(c, "uu26", "睡着了", GROUP_UU, p, R.color.icon_bg_uu26, R.color.icon_accent_white));
+            /*
+             * 第三批（uu27~uu30）：同一位画师的女仆系列。
+             * 名字刻意不带官方产品名 —— 这个 App 从 0.3.0 起就叫 Tdsh，
+             * 图标是"群里 uu 投稿的图"，标签按画面内容起个短名就够了。
+             */
+            l.add(v(c, "uu27", "鲸鱼女仆", GROUP_UU, p, R.color.icon_bg_uu27, R.color.icon_accent_white));
+            l.add(v(c, "uu28", "困困女仆", GROUP_UU, p, R.color.icon_bg_uu28, R.color.icon_accent_white));
+            l.add(v(c, "uu29", "举蒲公英", GROUP_UU, p, R.color.icon_bg_uu29, R.color.icon_accent_white));
+            l.add(v(c, "uu30", "端茶女仆", GROUP_UU, p, R.color.icon_bg_uu30, R.color.icon_accent_white));
             sAll = l;
         }
         return sAll;
     }
 
-    private static Variant v(Context c, String id, String label, String pkg, int bg, int accent) {
+    private static Variant v(Context c, String id, String label, String group, String pkg, int bg, int accent) {
         String alias = pkg + ".Icon" + Character.toUpperCase(id.charAt(0)) + id.substring(1);
-        return new Variant(id, label, alias, bg, accent);
+        return new Variant(id, label, group, alias, bg, accent);
     }
 
     public static Variant current(Context c) {

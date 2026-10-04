@@ -108,6 +108,16 @@ public class MainActivity extends Activity {
      */
     private static final String SIMULATE_OLD_WEBVIEW = "";
 
+    /**
+     * 开发用的"假装 WebView 太旧"开关，**正式构建必须为 false**。
+     *
+     * <p>为 true 时 {@link #webViewTooOld()} 恒为真 —— 这样在最新版 WebView 上
+     * 也能把「WebView 太旧」面板走一遍（配合调试桥
+     * {@code DshAndroid.pluginBootFailed("test")} 触发那条分支），
+     * 不用真去找一台 Chrome 6x 的老手机。
+     */
+    private static final boolean FORCE_WEBVIEW_TOO_OLD = false;
+
     /** 短命令的默认超时。 */
     private static final long EXEC_TIMEOUT_MS = 120_000L;
     private static final long EXEC_IDLE_MS = 120_000L;
@@ -222,7 +232,7 @@ public class MainActivity extends Activity {
         statusBar.setTextSize(12f);
         statusBar.setPadding(32, 26, 16, 26);
         statusBar.setTextColor(Color.WHITE);
-        statusBar.setText("DeepSeek Harness · 准备中…");
+        statusBar.setText("Tdsh · 准备中…");
         bar.addView(statusBar, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
@@ -337,8 +347,61 @@ public class MainActivity extends Activity {
             public void onPageFinished(WebView view, String url) {
                 mark("WebView 页面加载完成");
                 lastPageOkAt = System.currentTimeMillis();
-                if (mobilePatch != null) view.evaluateJavascript(mobilePatch, null);
+                /*
+                 * 只往**本机 DSH 页面**注入适配补丁。
+                 * 万一有外部网页进了这个 WebView（历史上真发生过：页面里的链接
+                 * 直接把整个界面顶掉了），补丁会去改它的排版，属于无谓的干扰。
+                 */
+                if (mobilePatch != null && isDshAppUrl(url)) {
+                    view.evaluateJavascript(mobilePatch, null);
+                }
                 reportWebViewVersion(view);
+            }
+
+            /**
+             * 页面里的链接被点开时的拦路虎 —— 用户反馈"在 DSH 里点开网页就退不出去了"。
+             *
+             * <h3>原来为什么会困住</h3>
+             * 没有实现这个方法时，DSH 聊天里的链接会在**同一个 WebView 里**把整个
+             * 界面顶掉：DSH 的界面没了、注入的"分层返回"也没了（那是 DSH 页面里的
+             * 函数），剩下的就是一个普通网页。用户没有地址栏、没有后退按钮，
+             * 系统返回键也被当成"退出 App"，于是他只能从最近任务里划掉。
+             *
+             * <h3>现在的做法</h3>
+             * 主框架只要想离开本机 DSH（127.0.0.1），就交给**系统浏览器**打开，
+             * 本 WebView 原地不动 —— DSH 界面还在，返回键也就是正常返回。
+             * 页面内部用的伪协议（blob: / data: / about:）不拦，否则会打断
+             * DSH 自己的预览功能。
+             */
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view,
+                    android.webkit.WebResourceRequest request) {
+                if (request == null) return false;
+                return handleExternalNavigation(request.getUrl(), request.isForMainFrame());
+            }
+
+            /** API < 24 的老签名（本 App minSdk 24，留着是为了别在低版本上漏拦）。 */
+            @SuppressWarnings("deprecation")
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                return handleExternalNavigation(url == null ? null : android.net.Uri.parse(url), true);
+            }
+
+            /**
+             * 老 WebView 的 JS **语法降级** —— 见 {@link JsCompat}。
+             *
+             * <p>背景：Chrome 88 的设备上，DSH 主 bundle 里的 class static block
+             * （Chrome 94+）会让整个 bundle 解析失败，界面永远空白；垫片救不了语法。
+             * 这里在**传输过程中**把那段语法换成等价的静态字段初始化 ——
+             * 不修改容器里 DSH 的任何文件（和 patch.js 一样，只改"经过我们手里的字节"）。
+             *
+             * <p>只在需要时启用（{@link #jsCompatRewrite}），新机器上这个方法
+             * 一行都不做，路径与以前完全一致。
+             */
+            @Override
+            public android.webkit.WebResourceResponse shouldInterceptRequest(
+                    WebView view, android.webkit.WebResourceRequest request) {
+                return maybeServeRewrittenJs(request);
             }
 
             /**
@@ -357,7 +420,7 @@ public class MainActivity extends Activity {
             @Override
             public boolean onRenderProcessGone(WebView view,
                     android.webkit.RenderProcessGoneDetail detail) {
-                boolean crashed = detail != null && detail.didCrash();
+                boolean crashed = didCrashCompat(detail);
                 Log.e(TAG, "WebView 渲染进程没了（didCrash=" + crashed + "）"
                         + " —— 该 WebView 实例已失效，重建界面");
                 appendReport("  · 界面渲染进程被系统回收（"
@@ -436,6 +499,39 @@ public class MainActivity extends Activity {
          * 与 multiple 标志，直接用它最稳妥。
          */
         webView.setWebChromeClient(new android.webkit.WebChromeClient() {
+            /*
+             * 页面里的 console 输出 —— 尤其是**脚本解析错误**。
+             *
+             * 为什么要收：0.2.8 那次"另一台老手机白屏"的排查，全靠我把 served 的
+             * bundle 抓下来手工分析才定位到（class static block）。而 Chrome 在
+             * 脚本解析失败时**本来就会往 console 打一行 SyntaxError** ——
+             * 只要把它收进报告，用户点一下「复制运行日志」就能直接看到原因，
+             * 不用再来回猜。
+             *
+             * 只留前 40 条、每条截 300 字：既能拿到现场，也不会让报告爆炸。
+             */
+            private int consoleCount = 0;
+
+            @Override
+            public boolean onConsoleMessage(android.webkit.ConsoleMessage msg) {
+                try {
+                    if (msg == null || consoleCount >= 40) return false;
+                    String text = msg.message();
+                    if (text == null || text.isEmpty()) return false;
+                    // 页面自己打的普通 log 太多，只收告警/错误（解析错误会以 error 级别出现）
+                    android.webkit.ConsoleMessage.MessageLevel level = msg.messageLevel();
+                    if (level != android.webkit.ConsoleMessage.MessageLevel.ERROR
+                            && level != android.webkit.ConsoleMessage.MessageLevel.WARNING) {
+                        return false;
+                    }
+                    if (text.length() > 300) text = text.substring(0, 300) + "…";
+                    consoleCount++;
+                    appendReport("  [页面console] " + text
+                            + "  @" + msg.sourceId() + ":" + msg.lineNumber() + "\n");
+                } catch (Throwable ignore) { }
+                return false;   // 返回 false：不拦截，页面该看到的照样看到
+            }
+
             @Override
             public boolean onShowFileChooser(WebView view,
                     android.webkit.ValueCallback<android.net.Uri[]> callback,
@@ -540,6 +636,21 @@ public class MainActivity extends Activity {
         ws.setDatabaseEnabled(true);
         ws.setUseWideViewPort(true);
         ws.setLoadWithOverviewMode(true);
+
+        /*
+         * 老 WebView 的**语法**降级开关（见 JsCompat 的类注释）。
+         *
+         * 必须在页面加载之前定好 —— shouldInterceptRequest 要靠它决定改不改写；
+         * 这里用 WebView.getDefaultUserAgent() 读版本，比等页面里的 UA 早得多。
+         */
+        int uaMajor = detectWebViewMajor();
+        webViewMajorFromUa = uaMajor;
+        jsCompatRewrite = FORCE_ASSET_REWRITE
+                || (uaMajor > 0 && uaMajor < MIN_WEBVIEW_SYNTAX_MAJOR);
+        Log.i(TAG, "WebView UA Chrome/" + uaMajor + " 语法降级=" + jsCompatRewrite);
+        if (jsCompatRewrite) {
+            mark("启用 JS 语法降级（WebView Chrome/" + uaMajor + " < " + MIN_WEBVIEW_SYNTAX_MAJOR + "）");
+        }
         // （setWebViewClient 已在上面设置，用于注入窄屏适配补丁）
         webView.setVisibility(View.GONE);
         stack.addView(webView, new FrameLayout.LayoutParams(
@@ -548,7 +659,7 @@ public class MainActivity extends Activity {
         setContentView(root);
 
         StringBuilder head = new StringBuilder();
-        head.append("DeepSeek Harness — 容器自检\n");
+        head.append("Tdsh — 容器自检\n");
         head.append("──────────────────────────\n");
         head.append("Android : ").append(Build.VERSION.RELEASE)
             .append(" (API ").append(Build.VERSION.SDK_INT).append(")\n");
@@ -659,7 +770,7 @@ public class MainActivity extends Activity {
             long ms = System.currentTimeMillis() - provisionStartedAt;
             String step = sCurrentStep == null ? "" : sCurrentStep;
             if (step.length() > 18) step = step.substring(0, 18) + "…";
-            statusBar.setText("DeepSeek Harness · 初始化中 " + fmtDuration(ms)
+            statusBar.setText("Tdsh · 初始化中 " + fmtDuration(ms)
                     + (step.isEmpty() ? "" : " · " + step));
             uiHandler.postDelayed(this, 1000);
         }
@@ -835,7 +946,7 @@ public class MainActivity extends Activity {
         Log.e(TAG, "provision failed", t);
         final boolean dshWasRunning = (dshUrl != null);
         runOnUiThread(() -> {
-            statusBar.setText("DeepSeek Harness · 初始化失败");
+            statusBar.setText("Tdsh · 初始化失败");
             // 顶部栏可能已经被 onServerReady 收起来了，这里必须重新亮出来，
             // 否则「重试」按钮根本点不到。
             if (topBar != null) {
@@ -861,6 +972,157 @@ public class MainActivity extends Activity {
             }
             appendReport(detail);
         });
+    }
+
+    /** 一次进程只弹一次（pageReady 会随重载反复上报）。 */
+    private static volatile boolean sChangelogShown = false;
+
+    /**
+     * 装上新版本之后**第一次真正进到界面**时，把这一版改了什么摊给用户看。
+     *
+     * <h3>为什么挂在 pageReady 上</h3>
+     * 这是"界面确实渲染出来了"的唯一信号（见 tools/patch.js 的 bootWatchdog）。
+     * 换版本时恰好也是界面起不来最可能发生的时刻 —— 如果这一版起不来，
+     * 用户先看到的是自救面板，而不是"更新内容"弹窗，顺序才对。
+     *
+     * <h3>为什么记在 prefs 里，还额外用静态标志兜一层</h3>
+     * prefs 管的是"跨版本只提示一次"（用户升级 → 看到 → 以后不再弹）；
+     * 静态标志管的是"同一次运行里别弹两次"（页面重载、Activity 重建都会
+     * 再调一次 pageReady）。
+     */
+    /** 首次进界面的免责声明与用途警告是否已被确认（一次性，永久记住）。 */
+    private boolean disclaimerAccepted() {
+        try {
+            return getSharedPreferences(DshService.PREFS, MODE_PRIVATE)
+                    .getBoolean("disclaimer_accepted_v1", false);
+        } catch (Throwable t) {
+            return true;      // 读不到就当已确认，别把界面卡在弹窗上
+        }
+    }
+
+    /**
+     * 首次真正进到界面时弹一次**免责声明 + 用途警告**。
+     *
+     * <p>口径与仓库里的 `免责声明-第三方插件.md` 一致：第三方非官方封装、与官方无关；
+     * 只能用于合法用途；几条红线逐条点名；数据都在本机、作者不收集；后果自负。
+     *
+     * <p>为什么只弹一次：这是**告知**，不是每次都要点同意的东西 —— 反复弹只会被
+     * 条件反射点掉。之后随时能在「手机权限」里重新看到免责声明。
+     *
+     * @param after 用户确认后接着做的事（这里是接着弹更新日志，避免两个弹窗叠在一起）
+     */
+    private void showDisclaimerOnce(final Runnable after) {
+        runOnUiThread(() -> {
+            try {
+                new AlertDialog.Builder(this)
+                        .setTitle("使用前请先读这一段")
+                        .setMessage(
+                                "Tdsh 是第三方做的非官方封装：把 AI 跑在手机本地容器里，"
+                              + "与任何官方产品、公司都没有关系，也不代表它们。\n\n"
+                              + "只能用于合法用途。以下这些一律不要用它做：\n"
+                              + "· 代刷课、代签到、代考、抢课 —— 学术不端，学校会处分；\n"
+                              + "· 开盒、买卖个人信息、爬取个人数据 —— 刑事犯罪；\n"
+                              + "· 跑分洗钱、诈骗话术、钓鱼、外挂、赌博引流 —— 刑事犯罪；\n"
+                              + "· 任何未经授权操作他人设备、账号的行为。\n\n"
+                              + "用它做违法的事，后果由使用者自己承担，与作者无关。\n\n"
+                              + "你的 API Key、对话与数据都只在这台手机上；本 App 不收集、"
+                              + "不上传任何内容（用途判断这类检查也都在本机完成）。\n\n"
+                              + "继续使用即表示你已阅读并同意以上内容。")
+                        .setCancelable(false)
+                        .setPositiveButton("我已阅读并同意", (d, w) -> {
+                            try {
+                                getSharedPreferences(DshService.PREFS, MODE_PRIVATE).edit()
+                                        .putBoolean("disclaimer_accepted_v1", true).apply();
+                                appendReport("  · 用户已确认首次免责声明\n");
+                            } catch (Throwable ignore) { }
+                            if (after != null) after.run();
+                        })
+                        .show();
+            } catch (Throwable t) {
+                Log.w(TAG, "免责声明弹窗失败", t);
+                if (after != null) after.run();
+            }
+        });
+    }
+    private void maybeShowChangelog() {
+        if (sChangelogShown) return;
+        /*
+         * 首次使用：**先**弹免责声明与用途警告，确认之后再走更新日志。
+         *
+         * 为什么必须在这之前、且用回调串起来：两个弹窗都挂在 pageReady 上，
+         * 同时弹会叠在一起（用户只看得到最上面那个）；而且"同意条款"这件事
+         * 应该发生在"看新功能"之前 —— 顺序反了就像是先给你看甜头再补一句免责。
+         * 所以这里不 return 到底，而是等用户点掉免责声明后**再调一次自己**。
+         */
+        if (!disclaimerAccepted()) {
+            showDisclaimerOnce(this::maybeShowChangelog);
+            return;
+        }
+        try {
+            int now = appVersionCode();
+            if (now <= 0) return;
+            android.content.SharedPreferences p =
+                    getSharedPreferences(DshService.PREFS, MODE_PRIVATE);
+            int seen = p.getInt("seen_version_code", 0);
+            if (seen >= now) { sChangelogShown = true; return; }
+
+            final List<Changelog.Entry> notes = Changelog.since(seen);
+            Changelog.Entry cur = Changelog.current();
+            if (notes.isEmpty() || cur == null) { sChangelogShown = true; return; }
+
+            /*
+             * 界面正在收尾（用户刚好在这一刻退出、或者系统在重建 Activity）时不要弹 ——
+             * 而且**也不能记账**：账记了、弹窗没出来，用户就永远看不到这一版的更新内容了。
+             * 这个判断必须在写 prefs 之前。
+             */
+            if (isFinishing()) return;
+            if (Build.VERSION.SDK_INT >= 17 && isDestroyed()) return;
+
+            sChangelogShown = true;
+            p.edit().putInt("seen_version_code", now).apply();
+
+            StringBuilder sb = new StringBuilder();
+            for (Changelog.Entry e : notes) {
+                if (notes.size() > 1) sb.append("v").append(e.version).append('\n');
+                for (String item : e.items) sb.append("· ").append(item).append('\n');
+                sb.append('\n');
+            }
+            sb.append(seen <= 0
+                    ? "（这条提示只出现一次，以后可在「设置 → 手机权限 → 更新日志」里翻）"
+                    : "（从第 " + seen + " 版升上来的，这条提示只出现一次）");
+
+            appendReport("  · 首次进入 v" + cur.version + "（第 " + now + " 版，上次 "
+                    + (seen <= 0 ? "未记录" : String.valueOf(seen)) + "），已展示更新内容\n");
+            Log.i(TAG, "展示更新日志 v" + cur.version + " seen=" + seen);
+
+            new AlertDialog.Builder(this)
+                    .setTitle(seen <= 0 ? ("欢迎使用 · v" + cur.version) : ("已更新到 v" + cur.version))
+                    .setMessage(sb.toString())
+                    .setPositiveButton("知道了", null)
+                    .setNeutralButton("全部更新日志", (d, w) -> {
+                        try {
+                            startActivity(new Intent(MainActivity.this, ChangelogActivity.class));
+                        } catch (Throwable t) {
+                            Log.w(TAG, "打开更新日志页失败", t);
+                        }
+                    })
+                    .show();
+        } catch (Throwable t) {
+            Log.w(TAG, "maybeShowChangelog failed", t);
+        }
+    }
+
+    /**
+     * {@code RenderProcessGoneDetail.didCrash()} 是 API 26 的方法。
+     *
+     * <p>{@code onRenderProcessGone} 这个回调本身也只在 API 26+ 才会被调用，
+     * 所以这里其实不会出问题 —— 但 lint 只看得到"minSdk 24 + API 26 方法"，
+     * 会把整个构建标成 Error（见 {@code Proc} 的类注释：我们已经被这类
+     * 静默放过的 Error 坑过一次）。显式判断一下，让检查恢复有效。
+     */
+    private static boolean didCrashCompat(android.webkit.RenderProcessGoneDetail d) {
+        if (d == null || Build.VERSION.SDK_INT < 26) return false;
+        return d.didCrash();
     }
 
     /** 让初始化线程自己退出：把最近一次失败原因清掉并复位 UI。 */
@@ -889,6 +1151,27 @@ public class MainActivity extends Activity {
         if (webView == null) {
             super.onBackPressed();
             return;
+        }
+        /*
+         * 兜底：界面现在停在**不是 DSH 的文档**上（正常路径下不该发生 —— 链接会被
+         * shouldOverrideUrlLoading 交给系统浏览器）。真发生了就直接把 DSH 拉回来，
+         * 绝不让用户对着一个没有地址栏、没有后退键的页面干瞪眼。
+         * isDshDocument 把 blob:/data: 这类顶层文档也算"不是 DSH"（见它的注释）。
+         */
+        String cur = null;
+        try {
+            cur = webView.getUrl();
+        } catch (Throwable ignore) { }
+        if (!isDshAppUrl(cur)) {
+            appendReport("  · 返回键：界面停在非 DSH 的文档上（" + cur + "），已拉回 DSH\n");
+            Log.w(TAG, "返回键发现界面停在非 DSH 文档，拉回 DSH: " + cur);
+            String home = DshService.getUrl() != null ? DshService.getUrl() : dshUrl;
+            if (home != null) {
+                webView.loadUrl(home);
+                android.widget.Toast.makeText(this, "已回到 DSH",
+                        android.widget.Toast.LENGTH_SHORT).show();
+                return;
+            }
         }
         webView.evaluateJavascript(
                 "(function(){try{return window.__dshHandleBack?window.__dshHandleBack():'false';}"
@@ -936,6 +1219,261 @@ public class MainActivity extends Activity {
         String host = origin.getHost();
         if (host == null) return false;
         return "127.0.0.1".equals(host) || "localhost".equals(host) || "::1".equals(host);
+    }
+
+    /**
+     * 这个 URL 是不是**本机 DSH 的文档**（用来决定"注不注入补丁"和"用户有没有被顶掉"）。
+     *
+     * <p>判成"是"的只有两类：
+     * <ul>
+     *   <li>还没有地址 / {@code about:blank} —— 那是加载中的页面内部状态，
+     *       不能当成"用户被困住了"（否则一按返回就去抢加载，反而把启动搞乱）；</li>
+     *   <li>回环地址（127.0.0.1 / localhost / ::1）。</li>
+     * </ul>
+     *
+     * <p><b>blob: / data: / file: 一律算"不是"</b>，两条理由：
+     * 一是注入的补丁会在陌生文档上乱改排版、甚至装上一个
+     * {@code __dshHandleBack}（那正是用户"困在网页里"的老成因）；
+     * 二是这类顶层文档同样没有地址栏和后退键，返回键该把用户拉回 DSH。
+     * （页面里嵌的 blob 预览是 **iframe**，顶层地址仍是回环，不受影响。）
+     */
+    private boolean isDshDocument(String url) {
+        if (url == null || url.isEmpty() || url.startsWith("about:")) return true;
+        if (url.startsWith("blob:") || url.startsWith("data:") || url.startsWith("file:")) return false;
+        try {
+            return isLocalOrigin(android.net.Uri.parse(url));
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * 这个 URL 是不是**DSH 界面本身** —— 比 {@link #isDshDocument} 更严一层：
+     * 回环还不够，**端口也得是 DSH 那个**。
+     *
+     * <h3>为什么必须再严一层（真实事故）</h3>
+     * 第三方插件会在**自己的端口**上起面板服务（用户那台是 127.0.0.1:18787），
+     * 而它把地址打进了 dsh 的输出 —— 当时 URL 识别"看到回环就抓"，
+     * 于是整个界面被加载成插件的网页：没有地址栏、没有后退键，
+     * 注入的分层返回也不在那个页面里 → 用户只能杀后台。
+     *
+     * <p>插件面板、本地代理（CLIProxyAPI 之类）都是"回环但不是 DSH"，
+     * 现在一律按"不是界面"处理：注入补丁要跳过、返回键要把用户拉回来、
+     * 主框架导航要交给系统浏览器（而不是把界面顶掉）。
+     *
+     * <p>DSH 端口未知时（比如还没解析出地址）退回宽松判断，避免把启动流程搞坏。
+     */
+    private boolean isDshAppUrl(String url) {
+        if (!isDshDocument(url)) return false;
+        int want = dshPort();
+        if (want <= 0) return true;
+        try {
+            int got = android.net.Uri.parse(url).getPort();
+            return got <= 0 || got == want;
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    /** DSH 界面的端口（从当前已知地址里取；取不到返回 -1）。 */
+    private int dshPort() {
+        String u = DshService.getUrl() != null ? DshService.getUrl() : dshUrl;
+        if (u == null) return -1;
+        try {
+            return android.net.Uri.parse(u).getPort();
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /**
+     * 老 WebView 的 JS 资源改写入口。返回 null = 交回 WebView 自己加载（原样）。
+     *
+     * <h3>为什么要拦、拦什么</h3>
+     * 只有 {@code .js} 资源，而且只在本机回环上、只在
+     * {@link #jsCompatRewrite} 打开时（WebView &lt; Chrome 94）。
+     * 刻意**不拦**主文档（它的鉴权 token 在 URL 上、而且不需要改写）和
+     * 大文件（超过 {@link #MAX_REWRITE_BYTES}，例如 10MB 的插件合并包：
+     * 那里面已经确认没有 static block，为了内存不值得缓冲）。
+     *
+     * <h3>为什么可以自己取回来</h3>
+     * DSH 的本地服务用 HttpOnly Cookie 鉴权。JS 子资源是在主文档之后才请求的，
+     * 那时 Cookie 已经种下；{@code CookieManager.getCookie()} **能读到 HttpOnly 的
+     * Cookie**（HttpOnly 只挡页面里的 JS，不挡宿主 App），所以这里带着 Cookie
+     * 自己取一份是通的。取回来之后**直接把这份交给 WebView**，避免它再取一次
+     * （那才是老机器上白白的双份下载）。
+     */
+    private android.webkit.WebResourceResponse maybeServeRewrittenJs(
+            android.webkit.WebResourceRequest request) {
+        if (!jsCompatRewrite || request == null) return null;
+        android.net.Uri uri = request.getUrl();
+        if (uri == null || !isLocalOrigin(uri)) return null;
+        String path = uri.getPath();
+        if (path == null || !path.endsWith(".js")) return null;
+        String method = request.getMethod();
+        if (method != null && !"GET".equalsIgnoreCase(method)) return null;
+
+        java.net.HttpURLConnection conn = null;
+        try {
+            conn = (java.net.HttpURLConnection) new java.net.URL(uri.toString()).openConnection();
+            conn.setConnectTimeout(15_000);
+            conn.setReadTimeout(30_000);
+            // 自己解压：WebResourceResponse 只能给"已经是明文"的内容
+            conn.setRequestProperty("Accept-Encoding", "identity");
+            String cookie = android.webkit.CookieManager.getInstance().getCookie(uri.toString());
+            if (cookie != null && !cookie.isEmpty()) conn.setRequestProperty("Cookie", cookie);
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                appendReport("  [旧WebView兼容] " + path + " 取回 HTTP " + code + "，本次不改写\n");
+                return null;
+            }
+            byte[] raw = readCapped(conn.getInputStream(), MAX_REWRITE_BYTES);
+            if (raw == null) {
+                appendReport("  [旧WebView兼容] " + path + " 超过 "
+                        + (MAX_REWRITE_BYTES / 1024 / 1024) + "MB，跳过改写\n");
+                return null;
+            }
+            String js = new String(raw, StandardCharsets.UTF_8);
+            JsCompat.Result r = JsCompat.rewrite(js);
+            if (r.ambiguous) {
+                appendReport("  [旧WebView兼容] " + path + " 扫描遇到歧义，"
+                        + "为安全起见原样加载（界面可能仍然空白）\n");
+                return null;
+            }
+            byte[] body;
+            if (r.count > 0) {
+                body = r.code.getBytes(StandardCharsets.UTF_8);
+                appendReport("  [旧WebView兼容] " + path + " 已改写 static block "
+                        + r.count + " 处（本机 WebView Chrome/" + currentWebViewMajorText()
+                        + " 不认识这个语法）\n");
+                Log.i(TAG, "JsCompat: " + path + " 改写 " + r.count + " 处");
+            } else {
+                body = raw;                       // 不需要改写，也用这份，省一次下载
+            }
+            android.webkit.WebResourceResponse resp = new android.webkit.WebResourceResponse(
+                    "application/javascript", "utf-8", new java.io.ByteArrayInputStream(body));
+            if (Build.VERSION.SDK_INT >= 21) {
+                java.util.Map<String, String> h = new java.util.HashMap<>();
+                /*
+                 * 允许缓存一天。
+                 *
+                 * 为什么敢缓存：DSH 的这些资源地址本身带内容指纹
+                 * （`index-5SrrfWpU.js` 的文件名、插件包的 `&rev=` 查询串），
+                 * 内容一变地址就变 —— 和我们自己写的补丁完全一样"地址即版本"。
+                 * 反之如果不给缓存头（最早写的是 no-store），每次进页面都要重新
+                 * 经过 Java 取一遍（主 bundle 600KB、插件包更大）——
+                 * 在本来就走降级路径的老机器上，这是白白的等待。
+                 */
+                h.put("Cache-Control", "max-age=86400");
+                resp.setResponseHeaders(h);
+            }
+            return resp;
+        } catch (Throwable t) {
+            Log.w(TAG, "改写 JS 资源失败，交回 WebView 自己加载: " + uri, t);
+            appendReport("  [旧WebView兼容] " + path + " 改写失败（" + t.getClass().getSimpleName()
+                    + "），交回系统加载\n");
+            return null;
+        } finally {
+            if (conn != null) {
+                try { conn.disconnect(); } catch (Throwable ignore) { }
+            }
+        }
+    }
+
+    /** 缓冲上限；超过就返回 null（调用方放弃改写）。 */
+    private static final int MAX_REWRITE_BYTES = 3 * 1024 * 1024;
+
+    /** 读到上限为止；超限返回 null。 */
+    private byte[] readCapped(java.io.InputStream in, int cap) throws java.io.IOException {
+        try {
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream(64 * 1024);
+            byte[] buf = new byte[32 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                if (bos.size() + n > cap) return null;
+                bos.write(buf, 0, n);
+            }
+            return bos.toByteArray();
+        } finally {
+            try { in.close(); } catch (Throwable ignore) { }
+        }
+    }
+
+    /**
+     * 读系统 WebView 的 Chrome 主版本（页面还没加载时就能拿到）。
+     *
+     * <p>用 {@code WebSettings.getUserAgentString()} 而不是
+     * {@code WebView.getDefaultUserAgent()} —— 后者在 API 36 的 android.jar 里
+     * **已经没有了**（javap 查过），编译期就找不到符号。
+     */
+    private int detectWebViewMajor() {
+        try {
+            String ua = null;
+            if (webView != null) ua = webView.getSettings().getUserAgentString();
+            if (ua == null || ua.isEmpty()) {
+                ua = android.webkit.WebSettings.getDefaultUserAgent(this);
+            }
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("Chrome/([0-9]+)").matcher(ua == null ? "" : ua);
+            if (m.find()) return Integer.parseInt(m.group(1));
+        } catch (Throwable t) {
+            Log.w(TAG, "读 WebView UA 失败", t);
+        }
+        return -1;
+    }
+
+    /** 报告里用的 WebView 版本：优先用页面回填的，回填之前用 onCreate 读到的。 */
+    private String currentWebViewMajorText() {
+        int v = webViewMajor > 0 ? webViewMajor : webViewMajorFromUa;
+        return v > 0 ? String.valueOf(v) : "?";
+    }
+
+    /**
+     * 拦下"界面要离开本机 DSH"的导航，改用系统浏览器打开。
+     *
+     * <p>拦两种：
+     * <ol>
+     *   <li>真正的外部网址（http/https 非回环）；</li>
+     *   <li>**回环但不是 DSH 端口**的地址 —— 典型是第三方插件的面板服务
+     *       （用户那台是 127.0.0.1:18787）。这类地址进了 WebView 就等于把 DSH 界面
+     *       整个顶掉，而且那页面上没有地址栏也没有后退键。交系统浏览器打开，
+     *       用户想看插件面板照样能看，但 DSH 界面留在原地。</li>
+     * </ol>
+     *
+     * @return true 表示这次导航已经由我们处理（WebView 不要再加载）
+     */
+    private boolean handleExternalNavigation(android.net.Uri uri, boolean isMainFrame) {
+        if (uri == null) return false;
+        String scheme = uri.getScheme();
+        if (scheme == null) return false;
+        scheme = scheme.toLowerCase();
+        // 只拦 http/https：blob:/data:/about:/file: 都得留给页面自己用
+        if (!"http".equals(scheme) && !"https".equals(scheme)) return false;
+        // 回环 + 就是 DSH 那个端口 → 是自家的导航，放行
+        if (isLocalOrigin(uri) && isDshAppUrl(uri.toString())) return false;
+        /*
+         * 子框架（iframe）不拦：页面里嵌的外部内容不是"用户点开的网页"，
+         * 把它扔进浏览器反而会把界面顶掉。真正困住用户的是主框架被替换。
+         */
+        if (!isMainFrame) return false;
+
+        boolean foreignLocal = isLocalOrigin(uri);
+        Log.i(TAG, (foreignLocal ? "本机其它服务（非 DSH）" : "外部链接")
+                + "交给系统浏览器: " + uri);
+        appendReport("  · " + (foreignLocal ? "本机其它服务（不是 DSH）" : "外部链接")
+                + "交给系统浏览器打开：" + uri + "\n");
+        try {
+            Intent view = new Intent(Intent.ACTION_VIEW, uri);
+            view.addCategory(Intent.CATEGORY_BROWSABLE);
+            startActivity(view);
+        } catch (Throwable t) {
+            Log.w(TAG, "没有浏览器能打开这个链接", t);
+            android.widget.Toast.makeText(this, "这台设备上没有能打开该链接的浏览器",
+                    android.widget.Toast.LENGTH_LONG).show();
+        }
+        // 无论浏览器开没开成，都**不要**让 WebView 导航过去 ——
+        // 界面留在 DSH 上是这个修复的核心
+        return true;
     }
 
     /** 系统权限框的结果：把挂起的网页请求答复掉，否则网页会一直卡在 pending。 */
@@ -1068,12 +1606,12 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 File base = Env.base(this);
-                deleteRecursively(new File(base, "rootfs"));
-                deleteRecursively(new File(base, "staticroot"));
-                deleteRecursively(new File(base, "ubuntu-base-arm64.tar.gz"));
-                deleteRecursively(new File(base, "ubuntu-base-arm64.tar.gz.part"));
+                Env.deleteRecursively(new File(base, "rootfs"));
+                Env.deleteRecursively(new File(base, "staticroot"));
+                Env.deleteRecursively(new File(base, "ubuntu-base-arm64.tar.gz"));
+                Env.deleteRecursively(new File(base, "ubuntu-base-arm64.tar.gz.part"));
                 for (File f : new File(base, "opt").listFiles()) {
-                    if (f.getName().startsWith("node-")) deleteRecursively(f);
+                    if (f.getName().startsWith("node-")) Env.deleteRecursively(f);
                 }
                 appendReport("  [重置] 已清空容器，准备重新下载\n");
             } catch (Throwable t) {
@@ -1086,13 +1624,12 @@ public class MainActivity extends Activity {
         }, "wipe-container").start();
     }
 
-    private void deleteRecursively(File f) {
-        if (f == null || !f.exists()) return;
-        File[] kids = f.listFiles();
-        if (kids != null) for (File k : kids) deleteRecursively(k);
-        //noinspection ResultOfMethodCallIgnored
-        f.delete();
-    }
+    /*
+     * 这里原来有一份自己的 deleteRecursively（清空容器用），但它**会跟进符号链接**：
+     * 容器里任何一个指向 /sdcard/... 的链接都会让删除顺着爬到用户手机上。
+     * 现在统一用 Env.deleteRecursively —— 它先用 Os.lstat 判断"这一项本身是不是链接"，
+     * 是链接就只摘链接本身。全 App 只有这一份实现，免得两处行为不一致。
+     */
 
     /** 手动「重试」时置 true：强制走完整自检，别用上次的标记糊弄过去。 */
     private volatile boolean sForceFullTest = false;
@@ -1108,7 +1645,7 @@ public class MainActivity extends Activity {
         mark("开始启动 dsh web");
         progress(t10, "  启动前台服务（App 退到后台也能存活）…\n");
         startDshService();
-        runOnUiThread(() -> statusBar.setText("DeepSeek Harness · 正在启动 dsh web…"));
+        runOnUiThread(() -> statusBar.setText("Tdsh · 正在启动 dsh web…"));
         awaitUrl();
         mark("dsh web 就绪（awaitUrl 返回）");
         appendReport("Phase 2 · 前台服务启动\n" + t10 + "\n");
@@ -1488,7 +2025,14 @@ public class MainActivity extends Activity {
                         int i = s.indexOf("applied\":");
                         if (i >= 0) applied = s.substring(i + 9, Math.min(i + 200, s.length()));
                         webViewVersion = ver;
-                        appendReport("  [WebView] Chrome/" + ver + " · 垫片补充: " + applied + "\n");
+                        // 主版本单独存一份：它是"跑不跑得动前端"的判据
+                        try {
+                            String head = ver.contains(".") ? ver.substring(0, ver.indexOf('.')) : ver;
+                            webViewMajor = Integer.parseInt(head);
+                        } catch (Throwable ignore) { }
+                        appendReport("  [WebView] Chrome/" + ver + " · 垫片补充: " + applied
+                                + (webViewTooOld() ? "  ⚠️ 低于 " + MIN_WEBVIEW_MAJOR
+                                        + "，DSH 前端可能解析不了（见更新的说明）" : "") + "\n");
                         Log.i(TAG, "WebView Chrome/" + ver + " shim=" + applied);
                     });
         } catch (Throwable t) {
@@ -1702,9 +2246,9 @@ public class MainActivity extends Activity {
                 progress(sb, "  ⚠️ 已存在的 rootfs 不完整（" + problem + "）→ 丢掉重下\n");
             }
             if (problem != null) {
-                deleteRecursively(rootfs);
-                deleteRecursively(archive);
-                deleteRecursively(new File(archive.getAbsolutePath() + ".part"));
+                Env.deleteRecursively(rootfs);
+                Env.deleteRecursively(archive);
+                Env.deleteRecursively(new File(archive.getAbsolutePath() + ".part"));
             }
 
             boolean ready = rootfsProblem(rootfs) == null;
@@ -1719,7 +2263,7 @@ public class MainActivity extends Activity {
                     progress(sb, "  先试本地已下载的归档（"
                             + (archive.length() / 1048576) + " MB）…\n");
                     ready = tryExtractRootfs(archive, rootfs, sb);
-                    if (!ready) deleteRecursively(archive);
+                    if (!ready) Env.deleteRecursively(archive);
                 }
                 String[] urls = Region.rootfsUrls(this);
                 for (int i = 0; i < urls.length && !ready; i++) {
@@ -1733,13 +2277,13 @@ public class MainActivity extends Activity {
                         ready = tryExtractRootfs(archive, rootfs, sb);
                         if (!ready) {
                             // 归档与解压结果都不可信，删干净再换下一个源
-                            deleteRecursively(archive);
+                            Env.deleteRecursively(archive);
                         }
                     } catch (Throwable t) {
                         progress(sb, "  该源失败: " + t.getClass().getSimpleName()
                                 + ": " + t.getMessage() + "\n");
-                        deleteRecursively(new File(archive.getAbsolutePath() + ".part"));
-                        deleteRecursively(archive);
+                        Env.deleteRecursively(new File(archive.getAbsolutePath() + ".part"));
+                        Env.deleteRecursively(archive);
                     }
                 }
                 if (!ready) {
@@ -1841,7 +2385,7 @@ public class MainActivity extends Activity {
     private boolean tryExtractRootfs(File archive, File rootfs, StringBuilder sb) {
         try {
             // 先清空：半个包叠在旧目录上会混出"看起来有、其实不全"的 rootfs
-            deleteRecursively(rootfs);
+            Env.deleteRecursively(rootfs);
             //noinspection ResultOfMethodCallIgnored
             rootfs.mkdirs();
             extractTarGz(archive, rootfs);
@@ -1855,7 +2399,7 @@ public class MainActivity extends Activity {
             progress(sb, "  ❌ 解压失败: " + t.getClass().getSimpleName()
                     + ": " + t.getMessage() + "\n");
         }
-        deleteRecursively(rootfs);
+        Env.deleteRecursively(rootfs);
         return false;
     }
 
@@ -2070,7 +2614,7 @@ public class MainActivity extends Activity {
                 if (archive.exists() && archive.length() < NODE_MIN_BYTES) {
                     progress(sb, "  ⚠️ 本地 Node 归档偏小（" + archive.length()
                             + " 字节）→ 丢掉重下\n");
-                    deleteRecursively(archive);
+                    Env.deleteRecursively(archive);
                 }
                 if (!(archive.exists() && archive.length() >= NODE_MIN_BYTES)) {
                     String[] urls = Region.nodeUrls(this);
@@ -2083,15 +2627,15 @@ public class MainActivity extends Activity {
                             ok = true;
                         } catch (Throwable t) {
                             progress(sb, "  该源失败: " + t.getMessage() + "\n");
-                            deleteRecursively(new File(archive.getAbsolutePath() + ".part"));
-                            deleteRecursively(archive);
+                            Env.deleteRecursively(new File(archive.getAbsolutePath() + ".part"));
+                            Env.deleteRecursively(archive);
                         }
                     }
                     if (!ok) return fail(sb, "Node 下载失败（" + urls.length + " 个源都不行）");
                 }
                 progress(sb, "  解压 Node 到容器 /opt …\n");
                 // 先清掉可能存在的半个 Node，再解压（否则会混出"有 bin/node 但缺库"的目录）
-                deleteRecursively(new File(rootfs, "opt/" + NODE_DIR));
+                Env.deleteRecursively(new File(rootfs, "opt/" + NODE_DIR));
                 extractTarGz(archive, new File(rootfs, "opt"));
             } else {
                 sb.append("  Node 已存在，跳过\n");
@@ -2112,8 +2656,8 @@ public class MainActivity extends Activity {
                  * 解压出来的 Node 跑不起来 → 把它和归档一起丢掉。
                  * 不丢的话下一次重试看到 bin/node 存在就"跳过"，永远好不了。
                  */
-                deleteRecursively(new File(rootfs, "opt/" + NODE_DIR));
-                deleteRecursively(new File(base, NODE_DIR + ".tar.gz"));
+                Env.deleteRecursively(new File(rootfs, "opt/" + NODE_DIR));
+                Env.deleteRecursively(new File(base, NODE_DIR + ".tar.gz"));
                 return fail(sb, "Node 解压后在容器里跑不起来（已丢弃，下次重试会重新下载）");
             }
             return sb.toString();
@@ -2156,8 +2700,8 @@ public class MainActivity extends Activity {
                     if (attempt > 1) {
                         progress(sb, "  ⚠️ 第 " + (attempt - 1) + " 次失败（退出码 " + code
                                 + "），清理缓存后重试…\n");
-                        deleteRecursively(new File(rootfs, "root/.npm"));
-                        deleteRecursively(new File(rootfs,
+                        Env.deleteRecursively(new File(rootfs, "root/.npm"));
+                        Env.deleteRecursively(new File(rootfs,
                                 "opt/" + NODE_DIR + "/lib/node_modules/@deepseek-ai"));
                     }
                     /*
@@ -2297,7 +2841,10 @@ public class MainActivity extends Activity {
         Thread watchdog = new Thread(() -> {
             long lastBeat = System.currentTimeMillis();
             try {
-                while (p.isAlive()) {
+                // 走 Proc：API 24/25 上没有 Process#isAlive —— 以前这里会抛
+                // NoSuchMethodError，被下面的 catch(Throwable) 吞掉，
+                // 于是"卡死判定"在老机器上**永久失效**（见 Proc 的类注释）
+                while (Proc.isAlive(p)) {
                     Thread.sleep(2000);
                     long now = System.currentTimeMillis();
                     long total = now - startedAt;
@@ -2370,12 +2917,11 @@ public class MainActivity extends Activity {
     // ── Phase 1c/2：dsh web 的启动与 URL 解析已移到 DshService ──
     // （原因：进程必须属于前台服务才能在 App 退到后台后存活。
     //   Activity 只负责启动服务并轮询 DshService.getUrl()。）
-
-    /** 从一行输出里抓出 127.0.0.1 的回环 URL（含 token 查询串）。 */
-    private String extractLoopbackUrl(String line) {
-        Matcher m = Pattern.compile("http://127\\.0\\.0\\.1:\\d+(?:/\\?[^\\s)]+)?").matcher(line);
-        return m.find() ? m.group() : null;
-    }
+    //
+    // 原来这里还有一个 extractLoopbackUrl()：只要看到 127.0.0.1 就抓。
+    // 它已经没有任何调用者，而且那个"看到回环就抓"的思路正是
+    // "插件面板把界面顶掉"事故的根源 —— 现在统一由 UrlPick 负责（只认带 token 的
+    // DSH 地址），所以把这个死方法删掉，免得以后有人又把它捡回去用。
 
     private void onServerReady(String url) {
         runOnUiThread(() -> {
@@ -2411,6 +2957,16 @@ public class MainActivity extends Activity {
      */
     private static final int AUTO_FIX_MAX = 2;
 
+    /**
+     * 用户点过「显示界面」之后，本次运行不再对前端自检做任何自动动作。
+     *
+     * <p>为什么必须是"用户说了算"：自检靠的是文案特征，判定权本就不该高于用户 ——
+     * 一旦判错（会话里引用了启动报错、DSH 改了启动卡结构…），
+     * 用户唯一的出路就只剩卸载重装。给他一个"我不认这个判定"的按钮，
+     * 代价只是"这次不自动停插件"，比把插件摘光、界面还进不去要轻得多。
+     */
+    private volatile boolean suppressBootWatchdog = false;
+
     private int autoFixCount() {
         try {
             return getSharedPreferences(PhoneBridge.PREFS, MODE_PRIVATE).getInt(KEY_AUTO_FIX, 0);
@@ -2444,12 +3000,9 @@ public class MainActivity extends Activity {
         return sb.length() == 0 ? "（无）" : sb.toString();
     }
 
-    /** 官方三件套 + 自带插件 —— 这些不该被"自救"停掉。 */
+    /** 官方三件套 + 自带插件 —— 这些不该被"自救"停掉（名单在 Env，只有一份）。 */
     private static boolean isProtectedBundle(String name) {
-        return "@deepseek-ai/dsh-base".equals(name)
-                || "@deepseek-ai/dsh-web-app".equals(name)
-                || Env.PHONE_PLUGIN_NAME.equals(name)
-                || Env.PHONE_FILES_NAME.equals(name);
+        return Env.safeBundles().contains(name);
     }
 
     /** profile 里**不是**官方/自带的那些（也就是用户自己装的第三方插件）。 */
@@ -2463,49 +3016,16 @@ public class MainActivity extends Activity {
         return out;
     }
 
-    /**
-     * 这段失败文本看起来是不是"插件引起的"。
+    /*
+     * ── "这段失败原文里点名了哪个插件"以前是两个私有方法写在这里 ──
      *
-     * <p>用途：决定自动自救时是"只停被点名的"还是"停掉全部第三方插件"。
-     * 注意"界面空白 25 秒"这种上报里没有任何文字，这里会返回 false ——
-     * 但那不代表与插件无关，所以调用方**并不用它来否决**自动自救，
-     * 只看"有没有第三方插件可停"。
+     * 现在搬到了 {@link PluginMsg}（纯逻辑，可以用 tools/PluginMsgSelfTest.java
+     * 拿真机日志跑回归）。原因是一个真实的漏判：
+     * DSH 0.2 的启动卡打出来的是 `dsh-pet: import failed (see console …)`，
+     * 而旧正则要求冒号后面**直接**是 pending/failed/error —— 认不出 "import failed"，
+     * 于是 App 当成"没点名"，退化成"停掉全部第三方插件"：
+     * 用户真机上 8 个插件被一次性摘掉，界面反而再也进不去。
      */
-    private static boolean looksPluginRelated(String detail) {
-        if (detail == null || detail.isEmpty()) return false;
-        String s = detail.toLowerCase(java.util.Locale.ROOT);
-        return s.contains("plugin") || s.contains("activate") || s.contains("pending")
-                || s.contains("waiting for service") || s.contains("failed to load")
-                || detail.contains("插件");
-    }
-
-    /**
-     * 从 DSH 的启动失败文本里抠出"可疑的插件包名"。
-     *
-     * <p>文本长这样（真机截图）：
-     * <pre>
-     *   dsh-speech: pending (waiting for service: settingsScope)
-     *   dsh-mobile-gateway: pending (waiting for service: settingsScope)
-     * </pre>
-     * 只保留**确实登记在 profile 里、且不是官方那几件**的名字 ——
-     * 否则可能把官方包一起停掉，那界面更起不来。
-     */
-    private List<String> suspectBundles(String detail) {
-        List<String> out = new java.util.ArrayList<>();
-        try {
-            List<String> registered = Env.profileBundles(this);
-            java.util.regex.Matcher m = java.util.regex.Pattern
-                    .compile("(?m)^\\s*([@A-Za-z0-9._/-]+)\\s*:\\s*(pending|failed|error)")
-                    .matcher(detail == null ? "" : detail);
-            while (m.find()) {
-                String name = m.group(1).trim();
-                if (registered.contains(name) && !out.contains(name) && !isProtectedBundle(name)) {
-                    out.add(name);
-                }
-            }
-        } catch (Throwable ignore) { }
-        return out;
-    }
 
     /**
      * 前端自检报告"插件把界面卡住了"时的自救入口。
@@ -2566,8 +3086,39 @@ public class MainActivity extends Activity {
      * 超过上限就停止自动动手，改为亮面板把决定权交回用户。
      */
     private void onPluginBootFailed(String detail) {
+        /*
+         * 用户点过「显示界面」= 他已经明确表示"这次判定我不认"。
+         * 那就别再自动停用插件、也别再弹面板打断他 —— 只记日志。
+         * （进程级开关：重启 App 后自检重新生效。）
+         */
+        if (suppressBootWatchdog) {
+            appendReport("  · 前端自检上报（已按用户选择忽略）\n"
+                    + (detail == null || detail.isEmpty() ? "" : detail + "\n"));
+            return;
+        }
         appendReport("  ⚠️ 前端自检：插件可能把界面卡住了\n"
                 + (detail == null || detail.isEmpty() ? "" : detail + "\n"));
+
+        /*
+         * ── 先排掉"根本不是插件的问题"：系统 WebView 太旧 ──
+         *
+         * 老手机（用户反馈的那台 iQOO 1 这类）出厂自带的系统 WebView 可能是
+         * Chrome 6x/7x，而 DSH 的前端是按现代浏览器打包的：**语法层面**就不认识
+         * （可选链 ?. 、空值合并 ?? 这些在 Chrome 80 之前直接是 SyntaxError）。
+         * 这种页面永远白屏，而且我们的兼容垫片救不了 —— 垫片补的是运行时缺的
+         * 全局对象，救不了解析阶段就报错的脚本。
+         *
+         * 所以这条分支必须在"停用插件"之前：否则用户会看到插件一个个被停掉、
+         * 界面照样起不来，最后只拿到一句"问题不在插件上"，什么也做不了。
+         */
+        if (webViewTooOld()) {
+            setBootFailCount(bootFailCount() + 1);
+            appendReport("  ⚠️ 系统 WebView 太旧（Chrome/" + webViewVersion
+                    + "，需要 " + MIN_WEBVIEW_MAJOR + "+），这不是插件的问题，跳过自动停用\n");
+            runOnUiThread(this::showWebViewTooOldPanel);
+            return;
+        }
+
         // 同时写到界面上：用户截图/复制日志时能看到这一行
         output.append("  ⚠️ 前端自检：插件可能把界面卡住了"
                 + "（profile 里登记了 " + Env.profileBundles(this).size() + " 个插件："
@@ -2575,7 +3126,20 @@ public class MainActivity extends Activity {
 
         int fails = bootFailCount() + 1;
         setBootFailCount(fails);
-        List<String> suspects = suspectBundles(detail);
+
+        /*
+         * 先解析"原文里到底点名了谁"（纯逻辑在 PluginMsg 里，有回归测试）。
+         *
+         * 注意"点名"分三种，动作完全不同：
+         *   · suspects      —— 登记在 profile 的第三方插件，可以停；
+         *   · protectedOnes —— 官方/自带插件，停它们没用、停第三方更是白折腾；
+         *   · unregistered  —— 名字不在 profile 里（写在 cordis.patch.yml 里，
+         *                      或已经被上一次自动停用摘掉了），只能如实告诉用户。
+         */
+        List<String> registered = Env.profileBundles(this);
+        PluginMsg.Parsed msg = PluginMsg.parse(detail, registered, Env.safeBundles());
+        List<String> suspects = msg.suspects;
+        boolean namedProtected = !msg.protectedOnes.isEmpty();
 
         /*
          * ── 自动自救：进不去就自己把第三方插件停掉 ──
@@ -2590,13 +3154,15 @@ public class MainActivity extends Activity {
          *     停掉**全部**第三方插件。
          *
          * 什么时候不自作主张：
+         *   · 点名的是**官方/自带**插件 → 停第三方插件对这种情况毫无帮助，
+         *     只会把用户自己的插件摘掉（真机上就是这么把 8 个一起摘没的）；
          *   · profile 里压根没有第三方插件可停 → 问题不在插件上，
          *     亮面板让用户看日志、给「重试」；
          *   · 已经自动救过 AUTO_FIX_MAX 次 → 说明停了也没用，
          *     不能无限"停用→重启"，此时改成亮面板 + 让用户发日志。
          */
         List<String> autoTargets = suspects.isEmpty() ? thirdPartyBundles() : suspects;
-        boolean canAuto = fails <= AUTO_FIX_MAX && !autoTargets.isEmpty();
+        boolean canAuto = !namedProtected && fails <= AUTO_FIX_MAX && !autoTargets.isEmpty();
 
         if (canAuto) {
             int n = Env.disableBundles(this, autoTargets);
@@ -2604,8 +3170,8 @@ public class MainActivity extends Activity {
             logSafeModeResult("自动停用并重启", n);
             appendReport("     判定依据：" + (suspects.isEmpty()
                     ? "上报里没有点名（按安全模式处理：停掉全部第三方插件）"
-                    : "上报里点名了 " + join(suspects))
-                    + (looksPluginRelated(detail) ? " · 文本特征：插件相关" : "") + "\n");
+                    : "上报里点名了 " + PluginMsg.join(suspects, 6))
+                    + (msg.pluginRelated ? " · 文本特征：插件相关" : "") + "\n");
             final int stopped = n;
             runOnUiThread(() -> {
                 android.widget.Toast.makeText(this,
@@ -2632,16 +3198,30 @@ public class MainActivity extends Activity {
             webView.setVisibility(View.GONE);
 
             /*
-             * 走到这里说明"自动自救"没能用上或没管用：
-             *   · profile 里没有第三方插件可停 —— 问题不在插件上；
-             *   · 或者已经自动救过 AUTO_FIX_MAX 次还是起不来 —— 再停也没意义。
-             * 两种情况都必须把话说清楚，并且给一个能点的出口。
+             * 走到这里说明"自动自救"没用上或没管用，必须把**到底是哪种情况**说清楚。
+             *
+             * 0.2.8.4 修的地方：以前只要"没有第三方插件可停"就一口咬定
+             * "问题不在插件上" —— 可是用户明明刚被我们摘光了插件，
+             * 那句结论既不真、也让他无处可去（用户反馈原话：
+             * "安全模式又出现问题了"）。现在四种情况分开说：
+             *   · 自动救过但没用；
+             *   · 点名的是官方/自带插件（这次没动你的插件）；
+             *   · 第三方插件**已经全停了**（这次没再动）；
+             *   · profile 里本来就没有第三方插件。
              */
             StringBuilder sb = new StringBuilder();
-            if (autoFixCount() > 0) {
+            List<String> alreadyDisabled = Env.disabledBundles(this);
+            if (namedProtected) {
+                sb.append("这次点名的是**自带/官方插件**（")
+                  .append(PluginMsg.join(msg.protectedOnes, 4))
+                  .append("）—— 停用第三方插件帮不上忙，所以这次没有动你的插件。\n\n");
+            } else if (autoFixCount() > 0) {
                 sb.append("已经自动停用第三方插件并重启过 ")
                   .append(autoFixCount()).append(" 次，界面仍然起不来 —— ")
                   .append("所以问题很可能不在插件上（容器/网络/版本不匹配都可能导致）。\n\n");
+            } else if (!alreadyDisabled.isEmpty()) {
+                sb.append("第三方插件**已经全部处于停用状态**（见下），界面还是没起来 —— ")
+                  .append("这次没有再动任何插件。\n\n");
             } else {
                 sb.append("界面没能加载出来，但 profile 里没有第三方插件可停 —— ")
                   .append("问题不在插件上。\n\n");
@@ -2650,32 +3230,117 @@ public class MainActivity extends Activity {
               .append("为 0.1.x 写的插件会一直等一个不存在的服务，")
               .append("前端就永远停在 pending —— 那类问题会自动被停用处理掉。\n\n");
             // 把"profile 里到底登记了哪些插件"摊出来 —— 排查和自救都要靠它
-            List<String> registered = Env.profileBundles(this);
             sb.append("profile 里登记了 ").append(registered.size()).append(" 个插件：")
               .append(join(registered)).append("\n\n");
-            if (!suspects.isEmpty()) {
-                sb.append("这次检测到可疑插件：\n");
-                for (String s : suspects) sb.append("  · ").append(s).append('\n');
+            // 顺手把系统 WebView 版本也报出来：老机器上"永远白屏"很多时候就是它
+            sb.append("系统 WebView：Chrome/").append(webViewVersion)
+              .append(webViewMajor > 0 ? "（需要 " + MIN_WEBVIEW_MAJOR + "+）" : "").append("\n\n");
+            if (jsCompatRewrite) {
+                sb.append("这台机器的 WebView 偏旧，App 已经**在传输中改写**过 JS 语法"
+                        + "（class static block）。如果界面还是空白，报告里会有 "
+                        + "[页面console] 那几行 —— 那是页面自己报的错，"
+                        + "把它「复制运行日志」发我就能定位。\n\n");
+            }
+            if (!msg.named.isEmpty()) {
+                sb.append("上报里点名了：").append(PluginMsg.join(msg.named, 6)).append('\n');
+                if (!msg.unregistered.isEmpty()) {
+                    sb.append("  · ").append(PluginMsg.join(msg.unregistered, 4))
+                      .append(" 不在 profile 的插件列表里 —— 可能写在 cordis.patch.yml 的 ")
+                      .append("insert 里（App 停不了它），也可能是上一次自动停用已经摘掉的。\n");
+                }
                 sb.append('\n');
             }
-            if (!Env.disabledBundles(this).isEmpty()) {
-                sb.append("已停用待恢复：").append(join(Env.disabledBundles(this))).append("\n\n");
+            if (!alreadyDisabled.isEmpty()) {
+                sb.append("已停用待恢复：").append(join(alreadyDisabled)).append("\n\n");
             }
-            sb.append("可以先点「重试」；还不行就把日志发给开发者 —— ")
-              .append("「手机权限 → 复制运行日志」。");
+            // patch 层里的插件：App 停不了它们，但排查时必须知道有这几行
+            String patchPlugins = Env.patchLayerPlugins(this);
+            if (!patchPlugins.isEmpty()) {
+                sb.append("cordis.patch.yml 里还写着这些插件（App 不能自动停用，")
+                  .append("要停得自己改那个文件）：").append(patchPlugins).append("\n\n");
+            }
+            sb.append("界面完全进不去时，点「强制停用全部第三方插件并重启」：")
+              .append("它会像安全模式那样把所有第三方插件摘掉后重启（官方与自带插件不受影响，")
+              .append("清单可在「手机权限 → 插件安全模式」里一键恢复）。\n\n");
+            sb.append("如果你觉得是 App 判错了（界面其实能看见），点「显示界面」就能进去。")
+              .append("要把日志发给开发者，点「复制日志」。");
+
+            /*
+             * 面板改成自定义布局：要放 **4 个**动作。
+             *
+             * 为什么把「安全模式并重启」加回来（0.2.8.4 曾经拿掉过）：
+             *   当时的理由是"能走到这个面板就说明停插件没用" —— 这句话对**自动**自救成立，
+             *   对**用户手动**点一下并不成立：真出现"界面完全进不去、又没被自动救回来"
+             *   的情况（自检没上报 / 上报里没点名 / 已经救满 2 次），用户需要有一步
+             *   "我不管了，把第三方插件全停掉"的动作。没有它，用户只能卸载重装。
+             *   所以：自动路径保留全部护栏（只在确认启动卡失败时动手、点名自带插件时不动手），
+             *   手动路径把决定权完全交回用户 —— 这是两件事，不该一起拿掉。
+             */
+            LinearLayout box = new LinearLayout(this);
+            box.setOrientation(LinearLayout.VERTICAL);
+            int px = Ui.dp(this, 20);
+            box.setPadding(px, Ui.dp(this, 8), px, Ui.dp(this, 12));
+
+            ScrollView sc = new ScrollView(this);
+            sc.setLayoutParams(new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 280)));
+            TextView tv = new TextView(this);
+            tv.setText(sb.toString());
+            tv.setTextSize(14);
+            tv.setTextColor(Ui.TEXT);
+            tv.setLineSpacing(Ui.dp(this, 3), 1f);
+            sc.addView(tv);
+            box.addView(sc);
+
+            box.addView(Ui.button(this, "重试", true, v -> restartDshAndWait()));
+            box.addView(Ui.button(this, "强制停用全部第三方插件并重启", false, v -> {
+                int n = Env.enterSafeMode(this);
+                logSafeModeResult("手动停用全部第三方插件", n);
+                android.widget.Toast.makeText(this,
+                        n > 0 ? "已停用 " + n + " 个第三方插件，正在重启"
+                              : "没有可停用的第三方插件，正在重启界面",
+                        android.widget.Toast.LENGTH_LONG).show();
+                restartDshAndWait();
+            }));
+            box.addView(Ui.button(this, "显示界面", false, v -> showWebViewAnyway()));
+            box.addView(Ui.button(this, "复制日志", false, v -> copyLogToClipboard()));
 
             new AlertDialog.Builder(this)
                     .setTitle("界面没能加载出来")
-                    .setMessage(sb.toString())
-                    .setPositiveButton("重试", (d, w) -> restartDshAndWait())
-                    .setNeutralButton("安全模式并重启", (d, w) -> {
-                        int n = Env.enterSafeMode(this);
-                        logSafeModeResult("手动安全模式", n);
-                        restartDshAndWait();
-                    })
-                    .setNegativeButton("复制日志", (d, w) -> copyLogToClipboard())
+                    .setView(box)
                     .show();
         });
+    }
+
+    /**
+     * 「显示界面」：把我们藏起来的 WebView 放回去，并且**本次运行不再自动判卡死**。
+     *
+     * <h3>为什么必须有这个出口</h3>
+     * App 的自检只可能比 DSH 本身"更不懂" —— 它靠的是文案特征。真要判错了
+     * （比如用户把启动报错粘进了对话、DSH 以后改了启动卡的结构），
+     * 用户面对的是一屏日志 + 一个点不动的界面，唯一出路是卸载重装（容器 150MB 白下）。
+     * 所以必须留一个"我判错了，让我进去"的按钮。
+     *
+     * <p>按下之后：本次进程内不再对任何上报做自动停用/弹面板（见
+     * {@link #suppressBootWatchdog}），插件保持原样 —— 用户可以在 DSH 里
+     * 自己看、自己修，真有问题再走「手机权限 → 插件安全模式」。
+     */
+    private void showWebViewAnyway() {
+        suppressBootWatchdog = true;
+        appendReport("  · 用户选择「显示界面」（忽略这次自检判定），本次运行不再自动停用插件\n");
+        try {
+            if (retryButton != null) retryButton.setVisibility(View.GONE);
+            output.setVisibility(View.GONE);
+            webView.setVisibility(View.VISIBLE);
+            webView.requestFocus();
+            if (topBar != null) {
+                topBar.animate().alpha(0f).setDuration(300)
+                        .withEndAction(() -> { if (topBar != null) topBar.setVisibility(View.GONE); })
+                        .start();
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "显示界面失败", t);
+        }
     }
 
     /**
@@ -2693,8 +3358,161 @@ public class MainActivity extends Activity {
         output.append(line);
     }
 
+    // ────────────────────────────────────────────────────────────────
+    // 系统 WebView 版本门槛
+    //
+    // 用户反馈过"安卓低版本进不去，例如 iQOO 1 首次加载进不去"。这类机器上
+    // 出厂自带的系统 WebView 可能是 Chrome 6x/7x，而 DSH 前端用了现代语法
+    // （可选链 / 空值合并是 Chrome 80+，DSH 自己的打包目标更高），
+    // 解析阶段就失败 —— 表现是**永远白屏**，我们的兼容垫片补不了这种情况
+    //（垫片补运行时缺的全局对象，管不了解析错误）。
+    //
+    // 以前这种机器的结局是：界面白 → 前端自检上报空白 → App 判定"插件卡住"
+    // → 停用插件 → 重启 → 还是白 …… 用户拿到的唯一提示是"问题不在插件上"。
+    // 现在改成：先看 WebView 版本，太旧就直接说清楚 + 给一条能走的路。
+    // ────────────────────────────────────────────────────────────────
+
+    /**
+     * 跑得动 DSH 前端的最低系统 WebView（Chrome 主版本）。
+     *
+     * <p>这个数字是"**实测**能跑起来的下限"，不是猜的：
+     * 0.2.8 时定 87（垫片能补的运行时 API 大致到这一档），
+     * 0.2.8.1 收到 **88** —— 因为 HONOR KOZ-AL00 / Chrome 88 的真机日志证明
+     * 88 配合垫片 + 语法降级（见 {@link JsCompat}）能跑，而更低就没验证过了。
+     */
+    private static final int MIN_WEBVIEW_MAJOR = 88;
+
+    /**
+     * 需要**语法降级**的系统 WebView 上限：Chrome 94 起原生支持 class static block
+     * （{@code static{…}}），低于它的机器要把这个语法在传输中改写掉。
+     * 详见 {@link JsCompat} 的类注释（那是一次真实用户事故的根因）。
+     */
+    private static final int MIN_WEBVIEW_SYNTAX_MAJOR = 94;
+
+    /**
+     * 开发用的"强制开启语法降级"开关，**正式构建必须为 false**。
+     *
+     * <p>本机 WebView 是新的，永远不会走降级分支；要验证改写本身有没有把页面改坏，
+     * 就得能强开它（配合 CDP 抓一次 served 的 bundle 看是否还含 {@code static{}）。
+     */
+    private static final boolean FORCE_ASSET_REWRITE = false;
+
+    /** 是否对 JS 资源做语法降级改写（页面加载前定好，见 onCreate）。 */
+    private volatile boolean jsCompatRewrite = false;
+
+    /**
+     * 从 UA 直接读到的 Chrome 主版本（onCreate 就有值）。
+     *
+     * <p>为什么单独存一份：{@link #webViewMajor} 要等页面加载完由页面里的 UA 回填，
+     * 而**第一次**拦 JS 资源时它还是 -1 —— 报告里就会出现"Chrome/-1 不认识这个语法"
+     * 这种自相矛盾的句子（真实日志里出现过）。这里存一份给报告用。
+     */
+    private volatile int webViewMajorFromUa = -1;
+
+    /** 从 UA 里解析出来的 Chrome 主版本；-1 = 还没测到。 */
+    private volatile int webViewMajor = -1;
+
+    /** 系统 WebView 是不是旧到跑不动前端（版本没测到时不判定，避免误报）。 */
+    private boolean webViewTooOld() {
+        if (FORCE_WEBVIEW_TOO_OLD) return true;      // 仅开发期，见该常量的说明
+        int v = webViewMajor;
+        return v > 0 && v < MIN_WEBVIEW_MAJOR;
+    }
+
+    /**
+     * 「WebView 太旧」面板：说清楚原因，并给一个能点的「去更新」。
+     *
+     * <p>为什么值得专做一个面板，而不是复用"界面没能加载出来"那个：
+     * 那个面板的下一步动作是"停用插件 / 重试"—— 对这种情况**全是错的**。
+     * 用户需要知道的是"去更新系统 WebView"，别的按钮只会让他白折腾。
+     */
+    private void showWebViewTooOldPanel() {
+        try {
+            if (topBar != null) {
+                topBar.animate().cancel();
+                topBar.setAlpha(1f);
+                topBar.setVisibility(View.VISIBLE);
+            }
+            if (retryButton != null) retryButton.setVisibility(View.VISIBLE);
+            output.setVisibility(View.VISIBLE);
+            webView.setVisibility(View.GONE);
+
+            String pkg = webViewPackageName();
+            String msg = "这台手机的系统 WebView 是 Chrome/" + webViewVersion
+                    + "，DSH 的界面需要 Chrome " + MIN_WEBVIEW_MAJOR + " 以上才能解析。\n\n"
+                    + "症状就是：容器装好了、日志里一切正常，界面却一直是白的"
+                    + "（页面脚本在**解析阶段**就报错，我们的兼容补丁救不了这种情况）。\n\n"
+                    + "怎么修：更新系统 WebView ——\n"
+                    + "  · 应用商店里搜「Android System WebView」或「Chrome」更新\n"
+                    + "  · 系统设置 → 应用 → 显示系统应用 → 找 " + pkg + " → 看能不能更新\n"
+                    + "  · 也可以自己下一个新版 WebView / Chrome 的安装包装上，"
+                    + "再到「开发者选项 → WebView 实现」里选中它\n"
+                    + "  · 都不行的话，这台机器装不了这个 App 的界面，"
+                    + "可以把「手机权限 → 复制运行日志」发给我确认\n\n"
+                    + "（报告里已记下 WebView 版本：" + webViewVersion + "）";
+
+            appendReport("  ❌ 系统 WebView 太旧：Chrome/" + webViewVersion
+                    + "（需要 " + MIN_WEBVIEW_MAJOR + "+，包名 " + pkg + "）\n");
+
+            new AlertDialog.Builder(this)
+                    .setTitle("这台手机的系统 WebView 太旧")
+                    .setMessage(msg)
+                    .setPositiveButton("去更新", (d, w) -> openWebViewStorePage(pkg))
+                    .setNeutralButton("仍然重试", (d, w) -> {
+                        sForceFullTest = true;
+                        startProvisioning("WebView 太旧但用户要求重试");
+                    })
+                    .setNegativeButton("复制日志", (d, w) -> copyLogToClipboard())
+                    .show();
+        } catch (Throwable t) {
+            Log.w(TAG, "showWebViewTooOldPanel failed", t);
+        }
+    }
+
+    /** 当前 WebView 提供者的包名（取不到就按 Google 的默认值）。 */
+    private String webViewPackageName() {
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                android.content.pm.PackageInfo pi = android.webkit.WebView.getCurrentWebViewPackage();
+                if (pi != null && pi.packageName != null) return pi.packageName;
+            }
+        } catch (Throwable ignore) { }
+        return "com.google.android.webview";
+    }
+
+    /**
+     * 把用户送到"能更新 WebView"的地方。
+     *
+     * <p>顺序是试出来的：国内 ROM（vivo/小米/华为）大多**没有 Play**，
+     * 但都有自己的应用商店并响应 {@code market://}；实在不行退到"应用详情页"，
+     * 那里至少能看到版本号并手动更新/卸载更新。
+     */
+    private void openWebViewStorePage(String pkg) {
+        Intent[] tries = new Intent[]{
+                new Intent(Intent.ACTION_VIEW, android.net.Uri.parse("market://details?id=" + pkg)),
+                new Intent(Intent.ACTION_VIEW,
+                        android.net.Uri.parse("https://play.google.com/store/apps/details?id=" + pkg)),
+                new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        android.net.Uri.parse("package:" + pkg)),
+        };
+        for (Intent it : tries) {
+            try {
+                startActivity(it);
+                appendReport("  · 已跳转更新 WebView：" + it.getData() + "\n");
+                return;
+            } catch (Throwable t) {
+                Log.w(TAG, "跳转失败，换下一个: " + it.getData(), t);
+            }
+        }
+        android.widget.Toast.makeText(this,
+                "这台设备上没有能打开应用商店的入口，请手动去应用商店搜 "
+                        + "Android System WebView 更新",
+                android.widget.Toast.LENGTH_LONG).show();
+    }
+
     /** 改完 plugins/bundles 之后重启容器里的 dsh，并等它给出新 URL。 */
-    private void restartDshAndWait() {        try {
+    private void restartDshAndWait() {
+        try {
             final String oldUrl = dshUrl;
             sLastFailure = null;
             output.append("正在重启容器里的 DSH（按新的插件列表加载）…\n");
@@ -2738,7 +3556,8 @@ public class MainActivity extends Activity {
 
         /** 打开「插件市场」页。 */
         @android.webkit.JavascriptInterface
-        public void openPluginMarket() {            runOnUiThread(() -> {
+        public void openPluginMarket() {
+            runOnUiThread(() -> {
                 try {
                     startActivity(new Intent(MainActivity.this, PluginMarketActivity.class));
                 } catch (Throwable t) {
@@ -2815,12 +3634,51 @@ public class MainActivity extends Activity {
                     setAutoFixCount(0);
                     appendReport("  ✅ 界面正常，启动失败/自动自救计数已清零\n");
                 }
+                // 界面确实出来了，才是"这一版改了什么"该现身的时候
+                maybeShowChangelog();
+            });
+        }
+
+        /** 用途守卫：页面侧要用的关键词清单（本地判断，不上传任何内容）。 */
+        @android.webkit.JavascriptInterface
+        public String guardPatterns() {
+            try { return Guard.patternsJson(); } catch (Throwable t) { return "[]"; }
+        }
+
+        /**
+         * 页面在对话里扫到疑似违规用途 → 弹一次警告。
+         *
+         * <p>只在本地判断：命中的词与说明写进运行日志，**不联网、不上报**。
+         * 12 小时内只弹一次（见 {@link Guard#shouldShow}），避免每轮都糊一脸。
+         */
+        @android.webkit.JavascriptInterface
+        public void misuseDetected(final String hit, final String what) {
+            runOnUiThread(() -> {
+                Env.report(MainActivity.this, "  [守卫] 对话里出现疑似违规用途的关键词："
+                        + hit + "（" + what + "）\n");
+                if (!Guard.shouldShow(MainActivity.this)) return;
+                Guard.markShown(MainActivity.this);
+                try {
+                    new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("请不要用 Tdsh 做违法的事")
+                            .setMessage(Guard.warningText(hit, what))
+                            .setPositiveButton("我知道了", null)
+                            .setNeutralButton("看免责声明", (d, w) -> {
+                                try {
+                                    startActivity(new Intent(MainActivity.this, PhonePermActivity.class));
+                                } catch (Throwable ignore) { }
+                            })
+                            .show();
+                } catch (Throwable t) {
+                    Log.w(TAG, "守卫弹窗失败", t);
+                }
             });
         }
 
         /** 打开「桌面图标」配色选择页。 */
         @android.webkit.JavascriptInterface
-        public void openIcons() {            runOnUiThread(() -> {
+        public void openIcons() {
+            runOnUiThread(() -> {
                 try {
                     startActivity(new Intent(MainActivity.this, IconActivity.class));
                 } catch (Throwable t) {
@@ -3044,7 +3902,7 @@ public class MainActivity extends Activity {
             output.setVisibility(View.VISIBLE);
             // 用 append 而不是 setText —— 否则会把已有的进度/日志全擦掉
             output.append("\n已保存设置，正在重启容器内的 DSH…\n");
-            statusBar.setText("DeepSeek Harness · 重启中…");
+            statusBar.setText("Tdsh · 重启中…");
         });
         DshService.requestRestart();
         new Thread(() -> awaitUrl(oldUrl), "await-restart").start();
@@ -3084,7 +3942,7 @@ public class MainActivity extends Activity {
                 final String st = DshService.getState();
                 final long el = System.currentTimeMillis() - t0;
                 runOnUiThread(() -> statusBar.setText(
-                        "DeepSeek Harness · " + st + "（已 " + fmtDuration(el) + "）"));
+                        "Tdsh · " + st + "（已 " + fmtDuration(el) + "）"));
             }
             try { Thread.sleep(1000); } catch (InterruptedException e) { return; }
         }
@@ -3254,7 +4112,8 @@ public class MainActivity extends Activity {
             while ((line = br.readLine()) != null) sb.append(line).append('\n');
         }
         // 这些是短命令，但同样不能无限等 —— proot 起不来时 readLine 会一直挂着。
-        boolean finished = p.waitFor(EXEC_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+        // Proc.waitFor：API 24/25 上没有带超时的 waitFor（见 Proc）
+        boolean finished = Proc.waitFor(p, EXEC_TIMEOUT_MS);
         if (!finished) {
             p.destroy();
             Env.killStaleDsh(Env.base(this));
@@ -3278,3 +4137,5 @@ public class MainActivity extends Activity {
         return s.replace('\n', ' ').trim();
     }
 }
+
+

@@ -131,6 +131,27 @@ public final class ShizukuBridge {
      * @return 命令输出（形如 "exit=0\n..."）；失败时抛异常，由调用方展示
      */
     public static String execShell(Context c, String command) throws Exception {
+        return execShell(c, command, false);
+    }
+
+    /**
+     * 同上，但用户服务用 {@code daemon(true)} 起 —— **装虚拟屏守护时必须用这个重载**。
+     *
+     * <p>为什么：普通模式（{@code daemon(false)}）的用户服务"跟着本进程走"，
+     * App 被系统回收时 Shizuku 会把服务进程收掉；而我们要用这个服务去拉起
+     * {@code app_process} 那两个守护，服务一收、进程组可能一起被清，
+     * "一键装好、之后一直是活的"就不成立了。daemon 模式让服务进程独立存活，
+     * 守护的父进程不会被顺手带走。
+     *
+     * <p>进程名后缀刻意与普通模式不同（{@code vshell}）：Shizuku 按
+     * "组件名 + 版本 + 后缀"识别一个用户服务，后缀一样会被当成同一个服务、复用同一个进程，
+     * 两种模式就混在一条命上了。
+     */
+    public static String execShellDaemon(Context c, String command) throws Exception {
+        return execShell(c, command, true);
+    }
+
+    private static String execShell(Context c, String command, boolean daemon) throws Exception {
         if (!isRunning()) throw new IllegalStateException("Shizuku 没有在运行");
         if (!hasPermission()) throw new IllegalStateException("本应用还没有拿到 Shizuku 权限");
 
@@ -152,9 +173,9 @@ public final class ShizukuBridge {
 
         Shizuku.UserServiceArgs args = new Shizuku.UserServiceArgs(
                 new ComponentName(c.getPackageName(), ShellUserService.class.getName()))
-                .daemon(false)              // 跟着本进程走，用完即走，不留后台进程
-                .version(1)
-                .processNameSuffix("shell"); // 必填，不设会抛 NullPointerException
+                .daemon(daemon)
+                .version(daemon ? 2 : 1)                  // 版本不同 = 另一个服务，不互相覆盖
+                .processNameSuffix(daemon ? "vshell" : "shell"); // 必填，不设会抛 NullPointerException
 
         Shizuku.bindUserService(args, conn);
         if (!latch.await(15, TimeUnit.SECONDS) || box[0] == null) {
@@ -165,7 +186,8 @@ public final class ShizukuBridge {
         } finally {
             /*
              * remove=false —— 只摘掉回调，**不要 kill 服务**。
-             * 传 true 会把用户服务进程杀掉，下次又要重新启动（慢且吵）。
+             * 传 true 会把用户服务进程杀掉，下次又要重新启动（慢且吵）；
+             * daemon 模式下更要留着，它就是我们拉起的守护的父进程。
              */
             try {
                 Shizuku.unbindUserService(args, conn, false);

@@ -194,6 +194,436 @@
             </intent-filter>
         </activity-alias>
 
+        <!--
+          用户投稿的图标（「uu们添加的图标」分类）。
+
+          为什么它们也得做成别名：同上的限制 —— 桌面图标只能是编译进 APK 的资源，
+          所以每张用户投稿的图都要在这里占一个 entry。
+          图片资源由 tools/make-user-icons.ps1 从 tools/usericons-raw/ 里的原图生成，
+          新增一张的步骤：图片放进那个目录 → 改脚本里的表 → 重跑脚本 →
+          在这里加一个别名 → IconSwitcher.all() 里加一行（同 id）。
+        -->
+        <activity-alias
+            android:name=".IconUu01"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu01"
+            android:roundIcon="@mipmap/ic_launcher_uu01"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu02"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu02"
+            android:roundIcon="@mipmap/ic_launcher_uu02"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu03"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu03"
+            android:roundIcon="@mipmap/ic_launcher_uu03"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu04"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu04"
+            android:roundIcon="@mipmap/ic_launcher_uu04"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu05"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu05"
+            android:roundIcon="@mipmap/ic_launcher_uu05"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu06"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu06"
+            android:roundIcon="@mipmap/ic_launcher_uu06"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu07"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu07"
+            android:roundIcon="@mipmap/ic_launcher_uu07"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu08"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu08"
+            android:roundIcon="@mipmap/ic_launcher_uu08"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu09"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu09"
+            android:roundIcon="@mipmap/ic_launcher_uu09"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu10"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu10"
+            android:roundIcon="@mipmap/ic_launcher_uu10"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu11"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu11"
+            android:roundIcon="@mipmap/ic_launcher_uu11"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu12"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu12"
+            android:roundIcon="@mipmap/ic_launcher_uu12"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu13"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu13"
+            android:roundIcon="@mipmap/ic_launcher_uu13"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu14"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu14"
+            android:roundIcon="@mipmap/ic_launcher_uu14"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu15"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu15"
+            android:roundIcon="@mipmap/ic_launcher_uu15"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu16"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu16"
+            android:roundIcon="@mipmap/ic_launcher_uu16"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu17"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu17"
+            android:roundIcon="@mipmap/ic_launcher_uu17"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu18"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu18"
+            android:roundIcon="@mipmap/ic_launcher_uu18"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu19"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu19"
+            android:roundIcon="@mipmap/ic_launcher_uu19"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu20"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu20"
+            android:roundIcon="@mipmap/ic_launcher_uu20"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu21"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu21"
+            android:roundIcon="@mipmap/ic_launcher_uu21"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu22"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu22"
+            android:roundIcon="@mipmap/ic_launcher_uu22"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu23"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu23"
+            android:roundIcon="@mipmap/ic_launcher_uu23"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu24"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu24"
+            android:roundIcon="@mipmap/ic_launcher_uu24"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu25"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu25"
+            android:roundIcon="@mipmap/ic_launcher_uu25"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu26"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu26"
+            android:roundIcon="@mipmap/ic_launcher_uu26"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- 第三批投稿图标（uu27~uu30，同一位画师的女仆系列） -->
+        <activity-alias
+            android:name=".IconUu27"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu27"
+            android:roundIcon="@mipmap/ic_launcher_uu27"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu28"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu28"
+            android:roundIcon="@mipmap/ic_launcher_uu28"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu29"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu29"
+            android:roundIcon="@mipmap/ic_launcher_uu29"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".IconUu30"
+            android:targetActivity=".MainActivity"
+            android:icon="@mipmap/ic_launcher_uu30"
+            android:roundIcon="@mipmap/ic_launcher_uu30"
+            android:label="@string/app_name"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
         <!-- 常驻服务：维持 dsh web 进程。targetSdk 28 故无需 foregroundServiceType。 -->
         <service
             android:name=".DshService"
@@ -256,6 +686,38 @@
             android:name=".IconActivity"
             android:exported="false"
             android:label="桌面图标" />
+
+        <!-- 更新日志：装上新版本第一次进界面弹的那次提示，内容就是这个页 -->
+        <activity
+            android:name=".ChangelogActivity"
+            android:exported="false"
+            android:label="更新日志" />
+
+
+        <!-- 中转站：自定义提供方（写进容器里的 DSH 设置，密钥只留本机） -->
+        <activity
+            android:name=".RelayActivity"
+            android:exported="false"
+            android:label="中转站" />
+
+        <!--
+          虚拟屏自动化：群友「如月雨露」做的受信任虚拟屏方案，
+          两个守护 dex 随 APK 的 assets/vsd 分发，本页负责装与启停。
+        -->
+        <activity
+            android:name=".VScreenActivity"
+            android:exported="false"
+            android:label="虚拟屏自动化" />
+
+        <!--
+          容器终端：在手机上直接敲容器里的命令。
+          每条命令起一个独立的 proot 会话（与正在跑的 DSH 共享 rootfs，不是同一个进程）。
+        -->
+        <activity
+            android:name=".TerminalActivity"
+            android:exported="false"
+            android:label="容器终端"
+            android:windowSoftInputMode="adjustResize" />
 
         <!-- 「手机权限」大类：把手机控制/白名单/插件市场/常驻服务/内核升级/桌面图标收在一起 -->
         <activity

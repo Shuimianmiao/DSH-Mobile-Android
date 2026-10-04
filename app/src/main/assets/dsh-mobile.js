@@ -17,6 +17,17 @@
   if (W.__dshMobilePatch && !W.__dshMobileForce) { W.__dshMobilePatch(); return; }
 
   var NARROW_PX = 700;          // 窄屏阈值
+  /*
+   * ⚠️ 页面加载失败时，Chromium 显示的是自己的内置错误页
+   * （chrome-error://chromewebdata/），那个文档里 **documentElement 是 null**。
+   * 我们在 onPageFinished 里是无条件注入的，所以这里必须先退出：
+   * 否则下面 `root.setAttribute(...)` 立刻抛异常，整段补丁只跑了一半。
+   * （错误页上没有任何 DSH 结构，补丁本来就无事可做。）
+   *
+   * 放在**最前面**是有意的：一旦发现不是正常文档，就整段不执行 ——
+   * 不留半个状态（observer 装了、手表没装之类的）。
+   */
+  if (!document.documentElement) return;
   var root = document.documentElement;
   var wasOpen = false;          // 设置弹窗上一次是否处于打开状态
 
@@ -1248,6 +1259,8 @@
      */
     markLanding();
     patchComposerEnter();
+    // 退格键删附件（附件卡片在编辑器外面，DSH 自己不认退格）
+    patchComposerBackspace();
     patchWorkspacePicker();
     // 「在默认程序中打开 / 打开方式」→ 交给安卓（与屏幕宽度无关，平板同样需要）
     patchOpenInApp();
@@ -1496,10 +1509,24 @@
     return 'false';
   };
 
-  new MutationObserver(scheduleApply).observe(document.documentElement, {
-    childList: true, subtree: true, attributes: true,
-    attributeFilter: ['class', 'aria-selected'],
-  });
+  /*
+   * ⚠️ documentElement 可能不存在 —— 页面加载失败时 Chromium 会显示内置错误页
+   * （chrome-error://chromewebdata/），在那个文档上 documentElement 是 null，
+   * 直接 observe 会抛 "parameter 1 is not of type 'Node'"（用户日志里刷了好几行）。
+   *
+   * ⚠️ 这里**只包住 observer**，不能用 `if (!…) return;` 提前退出：
+   * 那样会把整个 IIFE 剩下的部分一起跳过 —— 包括下面注册的前端自检
+   * （bootWatchdog → pluginBootFailed / pageReady，App 的自救和更新日志都靠它）、
+   * 给「手机文件」插件用的插入函数，以及最后那次 apply()。
+   * 一旦哪种情况下 documentElement 真的还没就绪，代价会是"补丁整个没生效"，
+   * 而不是"少一个 observer"。
+   */
+  if (document.documentElement) {
+    new MutationObserver(scheduleApply).observe(document.documentElement, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ['class', 'aria-selected'],
+    });
+  }
   window.addEventListener('resize', scheduleApply);
 
   /*
@@ -1515,14 +1542,43 @@
    * 唯一出路是卸载重装（等于把 150MB 容器再下一遍）。
    * 所以这里必须主动上报，让 App 弹自救面板（停用这些插件 / 安全模式）。
    *
-   * 两条判据：
-   *   ① 页面出现 DSH 的启动失败文案 → 立刻上报（连原文一起给，App 从里面抠插件名）；
-   *   ② 25 秒后主界面仍然空白 → 也上报（兜住"没有任何文案的白屏"）。
-   * 正常启动时 ② 会走 else 分支，什么都不做。
+   * ⚠️⚠️ 判据只能看 **DSH 自己的启动卡**，绝不能扫整页正文（0.2.8.4 修的事故）：
+   * 启动失败的文案（"web boot: 1 entry did not activate / dsh-pet: import failed"）
+   * 一旦被用户复制进对话、或被 agent 复述，它就**永久留在了会话正文里**。
+   * 以前的写法是 `document.body.innerText` 整页正则 —— 于是每次重启都命中这段
+   * 历史消息，App 把好端端的界面判成"插件卡死"：自动停用全部第三方插件 → 重启
+   * → 还是命中 → 插件被一个个摘光，界面反而再也进不去（用户反馈的
+   * "安全模式又出问题了""插件直接没了，但文件还在"就是这一条）。
+   *
+   * 启动卡是 `<div data-dsh-boot>`（见 DSH 前端 `_boot_*` 的 boot card），
+   * 只有它的正文里出现失败文案才是真的界面起不来。
+   *
+   * 四条判据（都要求"主界面确实没渲染出来"，正常启动一条都不会触发）：
+   *   ① 启动卡自己报了失败 → 立刻上报（连原文一起给，App 从里面抠插件名）；
+   *   ② 没有启动卡、正文里却有失败文案 → 兜底上报
+   *      （兜的是 DSH 以后改掉 data-dsh-boot 这个属性名的情况）；
+   *   ③ 没有启动卡、主界面也一直是空的（25 秒）→ 脚本压根没跑起来
+   *      （老 WebView 语法解析失败就是这种）；
+   *   ④ 启动卡在、但 60 秒还没往下走 → 卡在加载/等一个不存在的服务。
    */
   (function bootWatchdog() {
     if (W.__dshBootReported) return;
     var t0 = Date.now();
+    var FAIL = /Failed to load plugins|did not activate|waiting for service/i;
+
+    function bootCard() {
+      try { return document.querySelector('[data-dsh-boot]'); } catch (e) { return null; }
+    }
+    function textOf(el) {
+      try { return (el && el.innerText) || ''; } catch (e) { return ''; }
+    }
+    /** 主界面正文 = #root 的文本**减去启动卡那一份**（启动卡在 #root 里面）。 */
+    function appText() {
+      var t = textOf(document.getElementById('root') || document.body);
+      var ct = textOf(bootCard());
+      if (ct) t = t.split(ct).join(' ');
+      return t;
+    }
     function report(text) {
       if (W.__dshBootReported) return;
       W.__dshBootReported = true;
@@ -1534,25 +1590,107 @@
     }
     function tick() {
       if (W.__dshBootReported) return;
-      var body = (document.body && document.body.innerText) || '';
-      if (/Failed to load plugins|did not activate|waiting for service/i.test(body)) {
-        report(body);
+      /*
+       * 先确认"这确实是 DSH 的页面"：DSH 的 index.html 一定有 <div id="root">。
+       * 容器没起来 / 地址连不上时，WebView 显示的是一张 **Chromium 错误页**
+       * （chrome-error://chromewebdata/，没有 #root）—— 那种页面上判"界面没渲染出来"
+       * 会把责任推给插件，进而把用户的第三方插件全停掉，而真正的原因只是容器在重启。
+       * 这种页面交给 App 的心跳去重载（见 MainActivity.heartbeatCheck），这里什么都不做。
+       */
+      var rootEl = null;
+      try { rootEl = document.getElementById('root'); } catch (e) { rootEl = null; }
+      if (!rootEl) { setTimeout(tick, 1200); return; }
+
+      var card = bootCard();
+      var cardText = textOf(card);
+
+      // ① 启动卡自己说失败了 —— 唯一可信的"界面没起来"
+      if (cardText && FAIL.test(cardText)) {
+        report(cardText);
         return;
       }
-      if (Date.now() - t0 > 25000) {
-        var root = document.getElementById('root') || document.body;
-        var txt = ((root && root.innerText) || '').replace(/\s+/g, '');
-        if (txt.length < 12) report('(空白页面：主界面 25 秒内没有渲染出来)');
-        else {
+      var waited = Date.now() - t0;
+      if (waited > 25000) {
+        var appLen = appText().replace(/\s+/g, '').length;
+        if (appLen >= 12) {
           W.__dshBootReported = true;
           // 界面正常 → 告诉 App 把"连续启动失败"计数清零（见 MainActivity.pageReady）
           try { if (W.DshAndroid && W.DshAndroid.pageReady) W.DshAndroid.pageReady(); } catch (e) { }
+          return;
         }
-        return;
+        var loaded = true;
+        try { loaded = document.readyState === 'complete'; } catch (e) { loaded = true; }
+        if (!card) {
+          // ② 没有启动卡，正文里却有失败文案 —— 兜底（DSH 可能改了属性名）
+          var bodyText = textOf(document.body);
+          if (FAIL.test(bodyText)) { report(bodyText); return; }
+          // ③ 没有启动卡、正文也是空的：脚本压根没跑起来（老 WebView 解析失败就是这种）。
+          //    等页面加载完再判 —— 慢机器上 600KB 的前端要跑一会儿，不能刚数到 25 秒
+          //    就把用户的插件全停掉；最多等到 60 秒。
+          if (loaded || waited > 60000) {
+            report('(空白页面：主界面 25 秒内没有渲染出来)');
+            return;
+          }
+        } else if (waited > 60000) {
+          // ④ 启动卡在，但一直没往下走（转圈 / 等一个不存在的服务）
+          report('(界面 60 秒没有渲染出来，启动卡仍停在「'
+            + cardText.replace(/\s+/g, ' ').slice(0, 80) + '」)');
+          return;
+        }
       }
       setTimeout(tick, 1200);
     }
     setTimeout(tick, 1500);
+  })();
+
+  /*
+   * 【用途守卫：扫到"明显违法用途"就交给 App 弹一次警告】
+   *
+   * 边界（与 App 侧 Guard.java 一致）：纯本地判断、不上报、不阻止；
+   * 关键词表由 App 提供（DshAndroid.guardPatterns），所以改词不用动这个补丁。
+   * 只在文本变化时扫，且最多 5 秒一次 —— 不做无谓的整页 innerText。
+   *
+   * 注意：它以前挂在「语音播报」那个 IIFE 里（因为那个 IIFE 也是 2 秒 tick 一次）。
+   * 语音整块撤掉之后必须**独立出来**，否则守卫会跟着一起消失。
+   */
+  (function misuseGuard() {
+    if (!W.DshAndroid || !W.DshAndroid.misuseDetected) return;
+
+    var rules = null;
+    var lastScan = 0;
+    var lastText = '';
+
+    function scan() {
+      var now = Date.now();
+      if (now - lastScan < 5000) return;
+      lastScan = now;
+      if (rules === null) {
+        try { rules = JSON.parse(W.DshAndroid.guardPatterns() || '[]'); }
+        catch (e) { rules = []; }
+      }
+      if (!rules.length) return;
+      var body = (document.body && document.body.innerText) || '';
+      if (body.length === lastText.length) return;      // 文本没变就不重复扫
+      lastText = body;
+      for (var i = 0; i < rules.length; i++) {
+        var r = rules[i];
+        if (r && r.k && body.indexOf(r.k) >= 0) {
+          lastScan = now + 3600000;                     // 命中后本页不再重复触发
+          try { W.DshAndroid.misuseDetected(r.k, r.w || ''); } catch (e) { }
+          return;
+        }
+      }
+    }
+
+    try {
+      if (document.documentElement) {
+        new MutationObserver(function () {
+          try { scan(); } catch (e) { }
+        }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+      }
+    } catch (e) { }
+    setInterval(function () { try { scan(); } catch (e) { } }, 5000);
+    setTimeout(scan, 2000);
   })();
 
   /*
@@ -1592,6 +1730,68 @@
       return false;
     }
   };
+
+  /*
+   * 【退格键删附件】
+   *
+   * 用户反馈（群里的 bug 统计）：**在输入框插入图片后删不掉**。
+   * 真机复现（0.3.2，vivo / Android 16）：
+   *   · 用「+ → 文件」插一张图 → 输入框里出现缩略图卡片（带一个 ✕）；
+   *   · **点 ✕ 能删**；但按退格键（输入框里已经没有文字）**毫无反应**。
+   *
+   * 原因不是 bug 而是 DSH 的结构：附件卡片**不在** contenteditable 里，
+   * 它是编辑器外面的兄弟节点（实测 DOM：
+   *   div.JVDQca_item > div._54WpYG_imageItem > button._54WpYG_thumbnail + button._54WpYG_remove
+   * 而 remove 按钮的 aria-label 是「移除图片 xxx.gif」）——
+   * 光标在编辑器里按退格，永远碰不到外面那颗卡片。
+   *
+   * 所以在我们的补丁层补上这个行为：**当输入框已经空了、又有附件时，退格 = 删最后一个附件**。
+   * 为什么敢拦退格：
+   *   · 只有「编辑器可见文本为空」且「确实找到附件」两个条件同时成立才动手，
+   *     有字的时候一个字节都不碰（不影响正常删字）；
+   *   · 附件按钮就在编辑器的祖先节点范围内，作用域是"离编辑器最近的那个含附件的容器"，
+   *     不会误删别处（比如右侧栏预览面板）的按钮。
+   */
+  function patchComposerBackspace() {
+    if (W.__dshBackspacePatch) return;
+    W.__dshBackspacePatch = true;
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Backspace' && ev.keyCode !== 8) return;
+      if (ev.shiftKey || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+      var t = ev.target;
+      if (!t || !t.closest) return;
+      var box = t.closest('[contenteditable="true"]');
+      if (!box) return;
+
+      // 有字时照旧删字：只用可见文本判断（零宽空格要排掉，Lexical 会塞）
+      var text = (box.innerText || '').replace(/\u200b/g, '').trim();
+      if (text) return;
+
+      var btn = lastAttachmentRemove(box);
+      if (!btn) return;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      try { btn.click(); } catch (e) { /* 点不动就算了，别把输入卡住 */ }
+    }, true);
+  }
+
+  /** 离编辑器最近的那个"含附件"的祖先容器里，最后一个可见的移除按钮。 */
+  function lastAttachmentRemove(box) {
+    var scope = box;
+    var SEL = 'button[aria-label^="移除"],button[aria-label*="移除附件"]';
+    for (var i = 0; i < 8 && scope; i++) {
+      if (scope.querySelector && scope.querySelector(SEL)) break;
+      scope = scope.parentElement;
+    }
+    if (!scope || !scope.querySelector) return null;
+    var list = scope.querySelectorAll(SEL);
+    var last = null;
+    for (var j = 0; j < list.length; j++) {
+      var r = list[j].getBoundingClientRect();
+      if (r.width > 1 && r.height > 1) last = list[j];   // 按文档顺序取最后一个（= 最后插入的那个）
+    }
+    return last;
+  }
 
   apply();
 

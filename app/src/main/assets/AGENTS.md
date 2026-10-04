@@ -174,3 +174,40 @@ phone shot                                # 截图
 如果 `phone status` 显示目标应用不在白名单，**直接告诉用户去添加**，不要绕路：
 
 > 设置 → 📱 手机控制 → 勾选该应用 → 保存白名单
+
+## 6. 后台跑应用 / 看虚拟屏（`vscreen_*` 工具）
+
+上面那套 `phone` 是**操作用户正在看的那块屏**（受白名单限制、要无障碍）。
+如果用户要的是"**别占我的屏幕，在后台把某个应用跑起来**"，用 `vscreen_*`：
+
+| 工具 | 干什么 |
+|---|---|
+| `vscreen_ensure` | 确保守护在跑（没装就装、没起就起）—— **任何 vscreen 工具报"连不上"时先调它** |
+| `vscreen_list` | 列虚拟屏：displayId、分辨率、已取帧数 |
+| `vscreen_shot` | 取某块虚拟屏的画面存成 jpg → **必须再用 `read_image` 读那个路径** |
+| `vscreen_tap` | 按坐标点击（该屏自己的坐标系） |
+| `vscreen_swipe` | 滑动 / 滚动 |
+| `vscreen_key` | 发按键（BACK 对副屏有效；HOME/POWER/VOLUME 一般没用） |
+| `vscreen_app` | 把应用启动到虚拟屏上（后台跑，不跳屏） |
+
+它是"受信任虚拟屏"：应用跑在系统认可的虚拟屏上，**不抢前台、不跳屏**，
+取画面走本地 HTTP（毫秒级），比 `phone shot` 快得多，也**不受白名单与无障碍限制**。
+
+```bash
+# 典型流程
+vscreen_ensure            # 守护没起来时先起它（用户没授权 Shizuku 会失败，直接告诉用户）
+vscreen_app pkg=com.tencent.mm
+vscreen_shot i=0          # → 拿到 jpg 路径
+# read_image(file_path: "…/shot-0-….jpg")
+vscreen_tap i=0 x=540 y=2100
+vscreen_shot i=0          # 再看一眼确认
+```
+
+边界（别搞错）：
+
+- **虚拟屏上的应用 ≠ 用户手机前台的画面**。用户说"帮我看看我手机现在显示什么"要用 `phone shot`；
+  说"后台帮我操作某个 App"才用 `vscreen_*`。
+- 宿主 App（`com.dshmobile.probe`）**永远不能**放上虚拟屏（跨屏会让界面重启），守护会直接拒绝。
+- `vscreen_ensure` 需要用户授权过 Shizuku；**手机重启后守护会全灭**，要重新 `vscreen_ensure`。
+- 停止守护会把虚拟屏上跑着的应用一起杀掉 —— 不要为了"清理"随手停它，先问用户。
+

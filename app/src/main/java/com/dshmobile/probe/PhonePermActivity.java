@@ -77,6 +77,44 @@ public class PhonePermActivity extends Activity {
                 v -> pluginSafeMode()));
         root.addView(c7);
 
+        // ── 中转站（自定义提供方）──
+        // 把第三方网关/中转站接进 DSH：模型会出现在 DSH 的模型选择器里
+        int relayN = Providers.load(this).size();
+        LinearLayout cRelay = Ui.card(this, null, null);
+        cRelay.addView(Ui.row(this, "中转站",
+                relayN == 0 ? "接入第三方网关 / 中转站（自定义提供方）"
+                            : "已接入 " + relayN + " 个提供方 · 模型会出现在 DSH 的模型选择器里",
+                v -> open(RelayActivity.class)));
+        root.addView(cRelay);
+
+        // ── 虚拟屏自动化（群友「如月雨露」的受信任虚拟屏方案）──
+        // 为什么放在这一页：它和「中转站」一样属于"本机能力"，装/启/停都在那个页面里
+        LinearLayout cVs = Ui.card(this, null, null);
+        cVs.addView(Ui.row(this, "虚拟屏自动化",
+                "后台跑应用 + 取画面 + 按坐标操作（随包自带，一键装到手机上）",
+                v -> open(VScreenActivity.class)));
+        root.addView(cVs);
+
+        // ── 容器终端 ──
+        // 容器里有 Node / DSH 内核 / 插件 / 工作区文件，以前只能靠 agent 或插电脑看；
+        // 这一页给一个自己的终端（每命令一个新 proot 会话，只读命令随便跑）
+        LinearLayout cTerm = Ui.card(this, null, null);
+        cTerm.addView(Ui.row(this, "容器终端",
+                "在手机上直接敲容器里的命令（ls / dsh --version / npm …）",
+                v -> open(TerminalActivity.class)));
+        root.addView(cTerm);
+
+        // ── 更新日志 ──
+        // 装上新版本第一次进界面会弹一次，弹完就只在报告里留一行；
+        // 想再翻（或看旧版本改了什么）就走这里。
+        Changelog.Entry cur2 = Changelog.current();
+        LinearLayout c9 = Ui.card(this, null, null);
+        c9.addView(Ui.row(this, "更新日志",
+                cur2 == null ? "这一版改了什么"
+                             : "v" + cur2.version + " · 第 " + cur2.code + " 版改了什么",
+                v -> open(ChangelogActivity.class)));
+        root.addView(c9);
+
         /*
          * ── 复制运行日志 ──
          *
@@ -101,6 +139,11 @@ public class PhonePermActivity extends Activity {
      * 它们等的服务名在 0.2 里已经改了（settingsScope → settings），
      * 前端会一直 pending，整个界面起不来。App 会把它们摘掉让界面先回来，
      * 恢复（或再摘一次）就是这个入口。
+     *
+     * <p>0.2.8.2 起这里会把**每个被停用插件的文件现在在哪**写出来，并给「彻底删除」——
+     * 起因是用户反馈"开了安全模式之后插件直接没了，但文件还在"：
+     * 我们只把 {@code node_modules/<包名>} 挪进了 {@code .dsh-disabled/}，
+     * 而 pnpm 的共享商店里还留着一份真身（那是包管理器自己的缓存）。
      */
     private void pluginSafeMode() {
         final java.util.List<String> off = Env.disabledBundles(this);
@@ -112,24 +155,55 @@ public class PhonePermActivity extends Activity {
                 + "其余第三方插件先停掉，等界面回来了再逐个试。";
         } else {
             StringBuilder sb = new StringBuilder("已停用的插件：\n");
-            for (String s : off) sb.append("  · ").append(s).append('\n');
-            sb.append("\n「恢复全部」会把它们重新加回加载列表。\n")
-              .append("如果恢复后界面又起不来，说明其中某个插件与当前 DSH 版本不兼容 —— ")
-              .append("那就再进一次安全模式，并把它卸掉。");
+            for (String s : off) {
+                sb.append("  · ").append(s).append('\n')
+                  .append("      ").append(Env.pluginFileState(this, s)).append('\n');
+            }
+            sb.append("\n「恢复全部」会把它们重新加回加载列表，文件挪回原位（推荐）。\n")
+              .append("「彻底删除」则把文件也一并删掉 —— 连 pnpm 商店里那份副本一起，")
+              .append("之后想再用只能重新装一次。\n\n")
+              .append("说明：停用时文件是**挪走**而不是删除，所以还能一键恢复；")
+              .append("你在手机里可能仍能看到它占的空间，那是 pnpm 的共享商店，")
+              .append("用「彻底删除」才会真正清掉。");
             msg = sb.toString();
         }
-        new android.app.AlertDialog.Builder(this)
+        final boolean empty = off.isEmpty();
+        android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(this)
                 .setTitle("插件安全模式")
                 .setMessage(msg)
-                .setPositiveButton(off.isEmpty() ? "进入安全模式" : "恢复全部", (d, w) -> {
-                    int n = off.isEmpty() ? Env.enterSafeMode(this) : Env.restoreDisabledBundles(this);
+                .setPositiveButton(empty ? "进入安全模式" : "恢复全部", (d, w) -> {
+                    int n = empty ? Env.enterSafeMode(this) : Env.restoreDisabledBundles(this);
                     android.widget.Toast.makeText(this,
-                            off.isEmpty() ? ("已停用 " + n + " 个插件，重启 DSH 后生效")
-                                          : ("已恢复 " + n + " 个插件，重启 DSH 后生效"),
+                            empty ? ("已停用 " + n + " 个插件，重启 DSH 后生效")
+                                  : ("已恢复 " + n + " 个插件，重启 DSH 后生效"),
                             android.widget.Toast.LENGTH_LONG).show();
                     recreate();
                 })
-                .setNegativeButton("取消", null)
+                .setNegativeButton("取消", null);
+        if (!empty) {
+            b.setNeutralButton("彻底删除", (d, w) -> confirmPurge(off));
+        }
+        b.show();
+    }
+
+    /** 「彻底删除」前的二次确认 —— 这一步不可逆。 */
+    private void confirmPurge(final java.util.List<String> off) {
+        StringBuilder sb = new StringBuilder("会**彻底删除**这些插件的所有文件：\n");
+        for (String s : off) sb.append("  · ").append(s).append('\n');
+        sb.append("\n包括 node_modules 里的原位目录、.dsh-disabled 里的备份，")
+          .append("以及 pnpm 商店里的副本。\n\n")
+          .append("删掉之后想再用只能重新安装。确定吗？");
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("彻底删除这些插件？")
+                .setMessage(sb.toString())
+                .setPositiveButton("删除", (d, w) -> {
+                    int n = Env.purgeDisabledPlugins(this);
+                    android.widget.Toast.makeText(this,
+                            "已彻底删除 " + n + " 个插件（含文件）",
+                            android.widget.Toast.LENGTH_LONG).show();
+                    recreate();
+                })
+                .setNegativeButton("不删", null)
                 .show();
     }
 

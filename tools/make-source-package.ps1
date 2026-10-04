@@ -70,12 +70,40 @@ Write-Host '  tools\patch.js'
 Copy-Tree (Join-Path $root 'tools\cdp.mjs') (Join-Path $stage 'tools\cdp.mjs')
 Write-Host '  tools\cdp.mjs'
 
-# 两个打包脚本也进仓库：README 的「目录说明」里点名了它们，
+# 打包脚本也进仓库：README 的「目录说明」里点名了它们，
 # 不放进去就是死链接；而且别人想自己出一个可分发/可分享的包也得靠它们。
-foreach ($p in @('make-source-package.ps1', 'make-share-package.ps1')) {
+# （make-github-batches.ps1 = 网页上传用的分批目录，192 个文件得分 3 批）
+foreach ($p in @('make-source-package.ps1', 'make-share-package.ps1', 'make-github-batches.ps1')) {
     Copy-Tree (Join-Path $root "tools\$p") (Join-Path $stage "tools\$p")
     Write-Host "  tools\$p"
 }
+
+# 用户投稿图标的生成脚本：别人 fork 之后要加自己的图，靠的就是它。
+# （原图 tools\usericons-raw\ 不进仓库 —— 那是群友投稿的照片，
+#   已经转好的图标资源在 app\src\main\res 里，照样能构建。）
+Copy-Tree (Join-Path $root 'tools\make-user-icons.ps1') (Join-Path $stage 'tools\make-user-icons.ps1')
+Write-Host '  tools\make-user-icons.ps1'
+
+# 排查/回归工具：
+#   · 老 WebView 语法降级那一套（参考实现 + 体检器 + 逐字节对账）
+#   · UrlPick 的回归测试（"哪个地址才是 DSH"—— 用用户日志里的真实行做的用例）
+#   · 前端自检的回归测试（"界面起不来"的判定只能看启动卡，不能被聊天记录带偏）
+#   · 失败原文的解析回归（DSH 0.2 打的是 "xxx: import failed"，旧正则认不出）
+#   · 虚拟屏一键安装的脚本/解析回归（VScreenCmdSelfTest）
+foreach ($p in @('rewrite-static-block.mjs', 'dsh-api-inventory.mjs', 'JsCompatSelfTest.java',
+                 'UrlPickSelfTest.java', 'WebdogSelfTest.mjs', 'PluginMsgSelfTest.java',
+                 'ProvidersSelfTest.java', 'VScreenCmdSelfTest.java')) {
+    Copy-Tree (Join-Path $root "tools\$p") (Join-Path $stage "tools\$p")
+    Write-Host "  tools\$p"
+}
+
+# 虚拟屏守护的**源码与编译脚本**（群友「如月雨露」的方案）也进仓库：
+#   · 别人 clone 下来能自己编译那两个 dex（APK assets 里带的是编译产物）；
+#   · 只带 src 与 build.ps1、README，**不带 out\*.dex** —— 二进制不该进仓库。
+Copy-Tree (Join-Path $root 'tools\vscreen-src\src') (Join-Path $stage 'tools\vscreen-src\src')
+Copy-Tree (Join-Path $root 'tools\vscreen-src\build.ps1') (Join-Path $stage 'tools\vscreen-src\build.ps1')
+Copy-Tree (Join-Path $root 'tools\vscreen-src\README.md') (Join-Path $stage 'tools\vscreen-src\README.md')
+Write-Host '  tools\vscreen-src\（守护源码 + build.ps1）'
 
 Copy-Tree (Join-Path $src 'CHANGELOG.md') (Join-Path $stage 'CHANGELOG.md')
 Write-Host '  CHANGELOG.md'
@@ -84,8 +112,10 @@ Write-Host '  CHANGELOG.md'
 # 既不知道它是什么、也没法改。打包脚本一并附上，保证产物可复现。
 Copy-Tree (Join-Path $root 'plugin\dsh-phone') (Join-Path $stage 'plugin\dsh-phone')
 Copy-Tree (Join-Path $root 'plugin\dsh-phone-files') (Join-Path $stage 'plugin\dsh-phone-files')
+Copy-Tree (Join-Path $root 'plugin\dsh-link') (Join-Path $stage 'plugin\dsh-link')
+Copy-Tree (Join-Path $root 'plugin\dsh-vscreen') (Join-Path $stage 'plugin\dsh-vscreen')
 Copy-Tree (Join-Path $root 'plugin\build-tgz.ps1') (Join-Path $stage 'plugin\build-tgz.ps1')
-Write-Host '  plugin\ (dsh-phone + dsh-phone-files 源码 + 打包脚本)'
+Write-Host '  plugin\ (dsh-phone + dsh-phone-files + dsh-link + dsh-vscreen 源码 + 打包脚本)'
 
 # 使用者文档：源码包和分享包里是同一份，避免两边说法不一致。
 Copy-Tree (Join-Path $root '分享\安装与使用说明.md') (Join-Path $stage 'docs\安装与使用说明.md')

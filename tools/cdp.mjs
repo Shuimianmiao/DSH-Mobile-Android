@@ -3,6 +3,13 @@
 // 用法:
 //   node cdp.mjs --file <表达式文件>     # 执行文件里的 JS 表达式并打印结果
 //   node cdp.mjs "<表达式>"              # 直接执行
+//   node cdp.mjs --navigate <url>        # 让 WebView 直接导航到某个地址
+//   node cdp.mjs --crash                 # 让渲染进程崩溃（验证自愈）
+//
+// 为什么需要 --navigate：页面里的 `location.href=...` 会被 App 的
+// shouldOverrideUrlLoading 拦下来（外部链接交系统浏览器，见 0.2.8 的修复），
+// 所以"想验证界面停在外部网页时的返回键兜底"就必须走**浏览器进程发起**的导航 ——
+// CDP 的 Page.navigate 正好不经过 WebViewClient。
 //
 // 依赖: Node 21+ 内置的 fetch / WebSocket（本机 v24，无需 npm install）。
 // 前置: adb forward tcp:9222 localabstract:webview_devtools_remote_<appPid>
@@ -10,8 +17,11 @@ import { readFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
 const crash = args.includes('--crash');
+let navUrl;
 let expr;
-if (args[0] === '--file') {
+if (args[0] === '--navigate') {
+  navUrl = args[1];
+} else if (args[0] === '--file') {
   expr = readFileSync(args[1], 'utf8');
 } else if (!crash) {
   expr = args[0];
@@ -68,6 +78,12 @@ ws.addEventListener('open', async () => {
       try { await send('Page.enable'); } catch { }
       await send('Page.crash').catch(() => { });
       console.log('已发送 Page.crash（连接随渲染进程断开属正常）');
+      process.exit(0);
+    }
+    if (navUrl) {
+      await send('Page.enable');
+      const r = await send('Page.navigate', { url: navUrl });
+      console.log('已导航:', JSON.stringify(r));
       process.exit(0);
     }
     const r = await send('Runtime.evaluate', {

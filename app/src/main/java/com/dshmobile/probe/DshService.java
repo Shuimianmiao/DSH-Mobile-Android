@@ -16,8 +16,6 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * 常驻前台服务：在容器里维持 `dsh --profile web` 进程。
@@ -94,6 +92,17 @@ public class DshService extends Service {
             new java.util.ArrayDeque<>();
     private static final int RECENT_MAX = 60;
 
+    /**
+     * 已经写进报告的"非 DSH 的本机服务"地址。
+     *
+     * <p>为什么要有：插件会在自己的端口上起面板服务、并把地址打进 dsh 的输出。
+     * 我们要把它忽略掉（见 {@link UrlPick}），但**得在报告里留一行** ——
+     * 否则下次用户说"界面又变成插件的网页了"，日志里什么都看不出来。
+     * 用 set 去重，免得同一行刷满报告。
+     */
+    private final java.util.Set<String> foreignReported =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
     public static String getRecentOutput() {
         synchronized (sRecent) {
             if (sRecent.isEmpty()) return "(dsh 没有任何输出)";
@@ -146,9 +155,20 @@ public class DshService extends Service {
 
     public static String getState() { return sState; }
 
+    /** 从 URL 里取 host:port（状态栏显示用）。 */
+    private static String hostPortOf(String url) {
+        try {
+            java.net.URI u = java.net.URI.create(url);
+            return u.getHost() + ":" + u.getPort();
+        } catch (Throwable t) {
+            return url;
+        }
+    }
+
     public static boolean isAlive() {
         Process p = sProcess;
-        return p != null && p.isAlive();
+        // 走 Proc：API 24/25 上没有 Process#isAlive（见 Proc 的类注释）
+        return Proc.isAlive(p);
     }
 
     public static String getApiKey(Context c) {
@@ -325,7 +345,21 @@ public class DshService extends Service {
                 Log.w(TAG, "装自带插件异常", t);
             }
 
-            String[] cmd = Env.dshWebCommand(base, apiKey, tokenDir);
+            /*
+             * 中转站（自定义提供方）的密钥作为环境变量进容器。
+             *
+             * 为什么在这里注入而不是写进 settings.yaml：DSH 的 llm-pi-ai 用
+             * `apiKeyEnv: ACME_GATEWAY_API_KEY` 这种**凭据引用**，配置文件里不放密钥；
+             * 而容器命令是 `env -i`（清空环境），所以必须显式带到命令行上。
+             * 好处是密钥始终只在这台手机上（App 私有目录 + 启动参数），
+             * 容器里、容器写出来的文件里都搜不到它。
+             */
+            java.util.List<String> relayEnv = Providers.envPairs(this);
+            if (!relayEnv.isEmpty()) {
+                appendReport("  中转站密钥注入 " + relayEnv.size() + " 个（"
+                        + Providers.load(this).size() + " 个自定义提供方）\n");
+            }
+            String[] cmd = Env.dshWebCommand(base, apiKey, tokenDir, relayEnv);
 
             // 起新的之前先把可能残留的旧容器进程清掉（否则 3080 端口会被占住）
             int stale = Env.killStaleDsh(base);
@@ -356,19 +390,37 @@ public class DshService extends Service {
                     }
                     if (sUrl == null) {
                         /*
-                         * 放宽 URL 匹配：不再死认 127.0.0.1。
-                         * dsh 若打印 localhost / 0.0.0.0 之类的地址，
-                         * 原来的正则匹配不到 —— 表现就是"永远等不到 URL"。
-                         * 这里统一归一化成 127.0.0.1 再交给 WebView。
+                         * 只认 DSH **自己**的地址 —— 见 {@link UrlPick} 的类注释。
+                         *
+                         * 【真实事故】装了第三方插件（billion-context）之后，那个插件
+                         * 在自己的端口上起了个面板服务，并把地址打进了 dsh 的输出；
+                         * 旧逻辑"抓第一个 127.0.0.1 地址"于是抓到插件那个端口，
+                         * 整个界面被加载成插件的网页 —— 用户看到的就是"点开网页退不出去"。
+                         *
+                         * 现在要求地址带鉴权 token（DSH 的形态），插件/本地代理的
+                         * 裸端口一律不认；另外顺手把"看到的外来回环地址"记进报告，
+                         * 下次再有这种事，日志里直接能看出来。
                          */
-                        Matcher m = Pattern.compile(
-                                "https?://(?:127\\.0\\.0\\.1|localhost|0\\.0\\.0\\.0|\\[::1\\]|\\[::\\]):(\\d+)(/[^\\s)]*)?")
-                                .matcher(line);
-                        if (m.find()) {
-                            String path = m.group(2) == null ? "" : m.group(2);
-                            sUrl = "http://127.0.0.1:" + m.group(1) + path;
-                            setState("运行中 · 127.0.0.1:" + m.group(1));
+                        String foreign = UrlPick.pickForeignLoopback(line);
+                        if (foreign != null && foreignReported.add(foreign)) {
+                            appendReport("  · 输出里还有别的本地服务（不是 DSH，已忽略）："
+                                    + foreign + "\n");
+                            Log.i(TAG, "忽略非 DSH 的本机地址: " + foreign);
+                        }
+                        String picked = UrlPick.pickDshUrl(line);
+                        if (picked != null) {
+                            sUrl = picked;
+                            setState("运行中 · " + hostPortOf(sUrl));
                             appendReport("  dsh 就绪: " + sUrl + "\n");
+                            /*
+                             * 顺手把"配的是哪个模型 provider"记进报告。
+                             *
+                             * 起因：用户报"压缩上下文时 gateway/internal: … imageRequestPricing
+                             * is not a function"。那个错只跟 provider 的适配器有关
+                             * （见 Env.modelRoutes 的注释与 CHANGELOG v0.2.8.3），
+                             * 所以这一行是定位它的关键线索；只记 provider/model，不碰凭据。
+                             */
+                            appendReport("  · 模型路由：" + Env.modelRoutes(this) + "\n");
                             Log.i(TAG, "就绪: " + sUrl);
                             /*
                              * 容器活了才去拉常驻服务。
@@ -449,13 +501,14 @@ public class DshService extends Service {
     }
 
     @SuppressWarnings("deprecation")
-    private Notification buildNotification(String text) {        PendingIntent pi = PendingIntent.getActivity(
+    private Notification buildNotification(String text) {
+        PendingIntent pi = PendingIntent.getActivity(
                 this, 0, new Intent(this, MainActivity.class),
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Notification.Builder b = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
                 ? new Notification.Builder(this, CH_ID)
                 : new Notification.Builder(this);
-        return b.setContentTitle("DeepSeek Harness")
+        return b.setContentTitle("Tdsh")
                 .setContentText(text)
                 /*
                  * 通知图标跟随用户在「桌面图标」里选的那套配色：

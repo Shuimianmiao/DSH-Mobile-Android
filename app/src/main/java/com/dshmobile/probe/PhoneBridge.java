@@ -492,8 +492,8 @@ public final class PhoneBridge {
             }, "phone-" + tag + "-reader");
             r.setDaemon(true);
             r.start();
-            boolean done = p.waitFor(180, java.util.concurrent.TimeUnit.SECONDS);
-            if (!done) { p.destroyForcibly(); return "ERROR 安装超时（180 秒），已放弃\n"; }
+            boolean done = Proc.waitFor(p, 180_000L);
+            if (!done) { Proc.killForcibly(p); return "ERROR 安装超时（180 秒），已放弃\n"; }
             r.join(2000);
             String log;
             synchronized (out) { log = out.toString().trim(); }
@@ -710,7 +710,8 @@ public final class PhoneBridge {
     }
 
     /** 白名单校验：返回当前前台包名（通过），或 null（被拒）。 */
-    private static String guard(Context ctx) {        if (!DshAccessibilityService.isRunning()) {
+    private static String guard(Context ctx) {
+        if (!DshAccessibilityService.isRunning()) {
             throw new IllegalStateException(
                     "无障碍服务未开启。请在 设置 → 无障碍 中打开「DSH 手机控制」");
         }
@@ -826,6 +827,17 @@ public final class PhoneBridge {
          */
         if ("/plugin".equals(path)) {
             return plugin(ctx, p);
+        }
+
+        /*
+         * 虚拟屏自动化（群友「如月雨露」的受信任虚拟屏方案）。
+         *
+         * 为什么"起守护"要绕回 App：守护必须是 shell 身份，而插件跑在容器里（普通 uid），
+         * 它叫不动 adb、也没有 Shizuku。App 这边有 Shizuku 那条路，所以
+         * `op=ensure` 由 App 去做；取帧/点按那些插件直接打 127.0.0.1:18240 更快，不必绕这里。
+         */
+        if ("/vscreen".equals(path)) {
+            return VScreen.bridge(ctx, p);
         }
 
         if ("/shot".equals(path)) {

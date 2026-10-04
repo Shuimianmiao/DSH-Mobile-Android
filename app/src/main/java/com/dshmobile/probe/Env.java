@@ -259,10 +259,16 @@ public final class Env {
      * 这也是 DSH 读取凭据的第一优先级来源。
      */
     public static String[] dshWebCommand(File base, String apiKey, String phoneTokenDir) {
+        return dshWebCommand(base, apiKey, phoneTokenDir, null);
+    }
+
+    /** 同上，外加自定义提供方（中转站）的环境变量（见 containerCommand 的说明）。 */
+    public static String[] dshWebCommand(File base, String apiKey, String phoneTokenDir,
+                                        java.util.List<String> extraEnv) {
         java.util.List<String> extra = new java.util.ArrayList<>();
         extra.add("--no-open");
         extra.add("--port"); extra.add(String.valueOf(sPort));
-        return dshCommand(base, apiKey, phoneTokenDir, extra);
+        return dshCommand(base, apiKey, phoneTokenDir, extra, extraEnv);
     }
 
     /**
@@ -291,11 +297,18 @@ public final class Env {
      */
     public static String[] dshCommand(File base, String apiKey, String phoneTokenDir,
                                       java.util.List<String> extra) {
+        return dshCommand(base, apiKey, phoneTokenDir, extra, null);
+    }
+
+    /** 同上，外加自定义提供方的环境变量。 */
+    public static String[] dshCommand(File base, String apiKey, String phoneTokenDir,
+                                      java.util.List<String> extra,
+                                      java.util.List<String> extraEnv) {
         java.util.List<String> args = new java.util.ArrayList<>();
         args.add("--profile"); args.add("web");
         args.addAll(extra);
         return containerCommand(base, apiKey, phoneTokenDir,
-                "/opt/" + NODE_DIR + "/bin/dsh", args);
+                "/opt/" + NODE_DIR + "/bin/dsh", args, extraEnv);
     }
 
     /**
@@ -309,6 +322,25 @@ public final class Env {
      */
     public static String[] containerCommand(File base, String apiKey, String phoneTokenDir,
                                             String exe, java.util.List<String> args) {
+        return containerCommand(base, apiKey, phoneTokenDir, exe, args, null);
+    }
+
+    /**
+     * 同上，外加**自定义提供方（中转站）的密钥**。
+     *
+     * <p>为什么要单独传进来：容器命令用的是 {@code env -i}（清空继承的环境），
+     * 所以 ProcessBuilder 里设的变量一个都传不进去 —— 凭据必须显式写成
+     * {@code NAME=value} 放在 {@code env -i} 之后。DSH 的 {@code apiKeyEnv} 走的是
+     * "凭据引用"，它会从进程环境里解析这个名字，因此这样注入的密钥**不落盘**：
+     * settings.yaml 里只有 {@code apiKeyEnv: ACME_GATEWAY_API_KEY}，密钥留在手机里。
+     *
+     * <p>格式是 {@code NAME=value}（{@link Providers#envPairs} 生成），
+     * 名字由 Provider ID 派生（{@code acme-gateway} → {@code ACME_GATEWAY_API_KEY}），
+     * 与 DSH 的派生规则一致。
+     */
+    public static String[] containerCommand(File base, String apiKey, String phoneTokenDir,
+                                            String exe, java.util.List<String> args,
+                                            java.util.List<String> extraEnv) {
         String nodePath = "/opt/" + NODE_DIR + "/bin";
         java.util.ArrayList<String> a = new java.util.ArrayList<>();
         a.add(new File(base, "proot").getAbsolutePath());
@@ -367,6 +399,13 @@ public final class Env {
         a.add("DSH_PERMISSION_MODE=danger-full-access");
         if (apiKey != null && !apiKey.trim().isEmpty()) {
             a.add("DEEPSEEK_API_KEY=" + apiKey.trim());
+        }
+        // 中转站的密钥（见上面那段说明）：同样作为环境变量进容器，不写进任何文件
+        if (extraEnv != null) {
+            for (String kv : extraEnv) {
+                if (kv == null || kv.trim().isEmpty()) continue;
+                a.add(kv.trim());
+            }
         }
         a.add(exe);
         a.addAll(args);
@@ -435,7 +474,7 @@ public final class Env {
             }, "dsh-exec-out");
             reader.setDaemon(true);
             reader.start();
-            if (!p.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            if (!Proc.waitFor(p, timeoutMs)) {
                 p.destroy();
                 android.util.Log.w("DSH_ENV", "容器命令超时（" + timeoutMs + "ms）");
                 return null;
@@ -486,6 +525,17 @@ public final class Env {
     /** 右侧栏「手机文件」插件（浏览手机存储 + 多选加进会话）。 */
     public static final String PHONE_FILES_TGZ = "dsh-phone-files-1.0.2.tgz";
     public static final String PHONE_FILES_NAME = "dsh-phone-files";
+    /** 双端互通插件（狼狼做的 dsh-link）：纯 host 侧、只拨号出站，随 APK 一起装。 */
+    public static final String DSLINK_TGZ = "dsh-link-1.2.3.tgz";
+    public static final String DSLINK_NAME = "dsh-link";
+    /**
+     * 虚拟屏客户端插件（受信任虚拟屏那套；守护由群友「如月雨露」制作）。
+     *
+     * <p>它只负责让 DSH 里的 agent 会调虚拟屏（取帧/点按/放应用上屏），
+     * 真正的两个 dex 在 {@code assets/vsd/}，由「手机权限 → 虚拟屏自动化」装起来。
+     */
+    public static final String VSCREEN_TGZ = "dsh-vscreen-1.0.0.tgz";
+    public static final String VSCREEN_NAME = "dsh-vscreen";
     /**
      * 随 APK 内置的插件：{tarball 名, 包名}。
      * 加新插件只要在这里追加一行 + 跑 plugin\build-tgz.ps1。
@@ -493,6 +543,8 @@ public final class Env {
     private static final String[][] BUNDLED_PLUGINS = {
             { PHONE_PLUGIN_TGZ, PHONE_PLUGIN_NAME },
             { PHONE_FILES_TGZ, PHONE_FILES_NAME },
+            { DSLINK_TGZ, DSLINK_NAME },
+            { VSCREEN_TGZ, VSCREEN_NAME },
     };
 
     /**
@@ -622,6 +674,16 @@ public final class Env {
             PHONE_PLUGIN_NAME, PHONE_FILES_NAME
     };
 
+    /**
+     * 安全名单（官方 + 自带）—— 给 {@code PluginMsg.parse} 和 MainActivity 共用。
+     *
+     * <p>只此一份：以前 MainActivity 里另抄了一遍同样的四个名字，
+     * 改名单时两边容易走散。
+     */
+    public static java.util.List<String> safeBundles() {
+        return java.util.Arrays.asList(SAFE_BUNDLES);
+    }
+
     private static final String KEY_DISABLED = "disabled_bundles";
     /** 停用时把"依赖声明"也记下来（恢复时要照原样写回 dependencies）。 */
     private static final String KEY_DISABLED_SPECS = "disabled_bundle_specs";
@@ -631,6 +693,104 @@ public final class Env {
     /** profile 的 package.json —— 决定"加载哪些插件"的就是它。 */
     public static File profilePkg(Context c) {
         return new File(base(c), "rootfs/root/.dsh/profiles/web/package.json");
+    }
+
+    /** profile 的 patch 层 —— 模型路由（provider / model）就写在这里面。 */
+    private static File profilePatch(Context c) {
+        return new File(base(c), "rootfs/root/.dsh/profiles/web/cordis.patch.yml");
+    }
+
+    /**
+     * 当前配的模型路由（provider / model），给报告用。
+     *
+     * <p>为什么要记：用户反馈"压缩上下文时报
+     * {@code gateway/internal: …imageRequestPricing is not a function}"。
+     * 追到 DSH 内核后发现，这个错只会在**某个 provider 的适配器没实现
+     * {@code imageRequestPricing}** 时出现（DSH 自带的两个适配器都实现了，
+     * 详见 CHANGELOG v0.2.8.3）。所以"这台机器配的是哪个 provider"就是定位的关键 ——
+     * 它写在 {@code cordis.patch.yml} 里，App 直接读得到，顺手记进报告。
+     *
+     * <p>**只记 provider / model 这类标识，不碰任何凭据**（凭据在
+     * {@code .credentials.yaml}，我们不读它）。
+     */
+    public static String modelRoutes(Context c) {
+        try {
+            File f = profilePatch(c);
+            if (!f.exists()) return "（读不到 cordis.patch.yml）";
+            java.util.List<String> routes = new java.util.ArrayList<>();
+            String provider = null;
+            String model = null;
+            for (String raw : readText(f).split("\n")) {
+                String line = raw.trim();
+                if (line.startsWith("provider:")) {
+                    if (provider != null) routes.add(provider + "/" + (model == null ? "?" : model));
+                    provider = unquote(line.substring("provider:".length()));
+                    model = null;
+                } else if (line.startsWith("model:") && provider != null) {
+                    model = unquote(line.substring("model:".length()));
+                }
+            }
+            if (provider != null) routes.add(provider + "/" + (model == null ? "?" : model));
+            return routes.isEmpty() ? "（没写 provider，用默认）" : String.join("、", routes);
+        } catch (Throwable t) {
+            return "（读取失败：" + t.getClass().getSimpleName() + "）";
+        }
+    }
+
+    /**
+     * {@code cordis.patch.yml} 里"插"进来的插件（App 停不了它们，只能报给用户看）。
+     *
+     * <h3>为什么必须把它们摊出来</h3>
+     * "加载哪些插件"**不止** profile 的 {@code dsh.profile.bundles} 一处（DSH 0.2 的
+     * profile 是分层 patch 组合出来的）：
+     * <pre>
+     *   ~/.dsh/profiles/web/package.json   dsh.profile.bundles   ← App 一直只认这里
+     *   ~/.dsh/profiles/web/cordis.patch.yml   - insert: [{id, name}]  ← 也能挂插件
+     *   ~/.dsh/cordis.patch.yml                同上，而且对**所有** profile 生效
+     * </pre>
+     * 用户反馈过"界面起不来，但 profile 里只有 4 个插件、没有第三方可停"——
+     * 因为插件是写在 patch 层里的：App 的自救看不到它们，那句"问题不在插件上"
+     * 就成了误导。这里把名字读出来放进面板/日志，至少让排查有的放矢。
+     *
+     * <p>**只读、不改**：动 patch 层要理解 DSH 的组合规则（insert / id 定向覆盖 /
+     * {@code !!js} 表达式），猜错了会把用户整个 profile 弄坏 —— 那不是 App 该做的，
+     * 所以只在面板里如实说"要停得自己改那个文件"。
+     *
+     * @return "、" 连接的包名（没有则空串）
+     */
+    public static String patchLayerPlugins(Context c) {
+        java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+        try {
+            for (File f : new File[]{ profilePatch(c), homePatch(c) }) {
+                if (f == null || !f.exists()) continue;
+                for (String raw : readText(f).split("\n")) {
+                    String line = raw.trim();
+                    if (line.startsWith("- ")) line = line.substring(2).trim();
+                    if (!line.startsWith("name:")) continue;
+                    String v = unquote(line.substring("name:".length()));
+                    // package.json / YAML 里可能出现别的 name:（比如系统提示词的名字），
+                    // 只留下"像 npm 包名、又不是官方那几件"的
+                    if (v.isEmpty() || v.contains(" ") || !looksLikePackageName(v)) continue;
+                    if (SAFE_BUNDLES.length > 0 && safeBundles().contains(v)) continue;
+                    names.add(v);
+                }
+            }
+        } catch (Throwable ignore) { }
+        return String.join("、", names);
+    }
+
+    /** 家目录那一层 patch（对所有 profile 生效）。 */
+    private static File homePatch(Context c) {
+        return new File(base(c), "rootfs/root/.dsh/cordis.patch.yml");
+    }
+
+    private static String unquote(String s) {
+        String v = s == null ? "" : s.trim();
+        if (v.length() >= 2 && (v.charAt(0) == '"' || v.charAt(0) == '\'')
+                && v.charAt(v.length() - 1) == v.charAt(0)) {
+            v = v.substring(1, v.length() - 1);
+        }
+        return v;
     }
 
     /** 当前 profile 里登记的 bundle 列表（读不到返回空表）。 */
@@ -671,6 +831,173 @@ public final class Env {
     /** 安全模式是否生效中（即：有插件被我们摘掉了）。 */
     public static boolean safeModeActive(Context c) {
         return !disabledBundles(c).isEmpty();
+    }
+
+    /**
+     * 某个被停用的插件，**它的文件现在在哪**（给「插件安全模式」页展示）。
+     *
+     * <p>为什么要把这件事摊给用户看：用户反馈"开了安全模式之后插件直接没了，
+     * 但文件还在"。真相是 —— 我们只把 {@code node_modules/<包名>} 挪进了
+     * {@code node_modules/.dsh-disabled/}（所以 DSH 加载不到它了），
+     * 而 **pnpm 的共享商店 {@code node_modules/.pnpm/} 里还留着一份真身**：
+     * 那是包管理器自己的缓存，不跟着我们挪。所以"文件还在"是正常的，
+     * 但用户看不到这个解释，就会以为没停干净或者恢复不了。
+     */
+    public static String pluginFileState(Context c, String name) {
+        try {
+            File nm = new File(profilePkg(c).getParentFile(), "node_modules");
+            File grave = new File(new File(nm, ".dsh-disabled"), name);
+            File orig = new File(nm, name);
+            int store = pnpmStoreCopies(nm, name);
+            StringBuilder sb = new StringBuilder();
+            // exists() 会跟进链接：链接还在、目标没了时它也报 false，所以单独认一下
+            sb.append(grave.exists() ? "已挪到 .dsh-disabled"
+                    : (isSymlink(grave) ? "坟场里有个失效的链接" : "坟场里没有"));
+            sb.append(" · 原位").append(orig.exists() ? "还在" : "已不在");
+            if (store > 0) sb.append(" · pnpm 商店里还有 ").append(store).append(" 份");
+            return sb.toString();
+        } catch (Throwable t) {
+            return "读不到文件状态";
+        }
+    }
+
+    /** pnpm 商店里与这个包有关的目录数（也就是"文件还在"的那些）。 */
+    private static int pnpmStoreCopies(File nodeModules, String name) {
+        try {
+            File store = new File(nodeModules, ".pnpm");
+            if (!store.isDirectory()) return 0;
+            String flat = name.replace('/', '+');          // @scope/name → @scope+name
+            File[] kids = store.listFiles();
+            if (kids == null) return 0;
+            int n = 0;
+            for (File k : kids) {
+                String kn = k.getName();
+                if (kn.equals(flat) || kn.startsWith(flat + "@")) n++;
+            }
+            return n;
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    /**
+     * 彻底删除所有"被停用"的插件：坟场里的、原位的、以及 pnpm 商店里的副本，
+     * 并把 App 里的停用记录一并抹掉。
+     *
+     * <p>这是**不可逆**操作（用户要的就是"别留文件"），所以界面上必须先确认。
+     *
+     * <h3>三处不能想当然的地方（都是复查时发现并改掉的）</h3>
+     * <ol>
+     *   <li><b>范围校验不能用 {@code getCanonicalPath()}</b>：pnpm 装出来的
+     *       {@code node_modules/<包名>} 常常是**符号链接**，canonical 会解析到链接目标 ——
+     *       目标在 node_modules 内时能过（走 {@code .pnpm/}），
+     *       目标在外时（{@code file:../xxx}）就被判成"越界"而整条跳过。
+     *       现在改成校验**父目录**（不解析叶子），叶子交给符号链接安全的删除去处理；
+     *       跨目录的名字则由 {@link #looksLikePackageName} 挡掉。</li>
+     *   <li><b>删不掉的项必须留在"待恢复"名单里</b>：早先的写法是无论成功失败都
+     *       把停用记录清空 —— 万一某个包没删掉（名字畸形 / 权限），用户就得到
+     *       "文件还在、但恢复入口没了"，正是这次要修的那种状态。</li>
+     *   <li><b>只有真的删掉了，才从 profile 里抹掉名字</b>，否则那个包既不在
+     *       bundle 列表里、文件又还在，谁也说不清它到底算不算装过。</li>
+     * </ol>
+     *
+     * @return 真正处理掉的插件个数
+     */
+    public static int purgeDisabledPlugins(Context c) {
+        java.util.List<String> dis = disabledBundles(c);
+        if (dis.isEmpty()) return 0;
+        java.util.List<String> purged = new java.util.ArrayList<>();
+        java.util.List<String> kept = new java.util.ArrayList<>();
+        try {
+            File nm = new File(profilePkg(c).getParentFile(), "node_modules");
+            File grave = new File(nm, ".dsh-disabled");
+            File store = new File(nm, ".pnpm");
+            String nmCanon = nm.getCanonicalPath() + File.separator;
+            for (String name : dis) {
+                try {
+                    if (!looksLikePackageName(name)) {
+                        android.util.Log.w("DSH_SAFEMODE", "包名不像包名，保留记录不动：" + name);
+                        kept.add(name);
+                        continue;
+                    }
+                    File target = new File(nm, name);
+                    File graveTarget = new File(grave, name);
+                    // 只看父目录：既挡住 ../.. 这类越界，又不会因为叶子是符号链接而误判
+                    File p1 = target.getParentFile();
+                    File p2 = graveTarget.getParentFile();
+                    if (p1 == null || p2 == null
+                            || !p1.getCanonicalPath().startsWith(nmCanon)
+                            || !p2.getCanonicalPath().startsWith(nmCanon)) {
+                        android.util.Log.w("DSH_SAFEMODE", "路径越界，保留记录不动：" + name);
+                        kept.add(name);
+                        continue;
+                    }
+                    deleteRecursively(graveTarget);                // 坟场里那份（是链接就只摘链接）
+                    deleteRecursively(target);                     // 万一没挪走
+                    String flat = name.replace('/', '+');
+                    File[] kids = store.listFiles();
+                    if (kids != null) {
+                        for (File k : kids) {
+                            String kn = k.getName();
+                            if (kn.equals(flat) || kn.startsWith(flat + "@")) {
+                                deleteRecursively(k);              // pnpm 商店里那份
+                            }
+                        }
+                    }
+                    purged.add(name);
+                    android.util.Log.i("DSH_SAFEMODE", "已彻底删除 " + name);
+                } catch (Throwable e) {
+                    android.util.Log.w("DSH_SAFEMODE", "删除失败，保留记录：" + name, e);
+                    kept.add(name);
+                }
+            }
+            // 只有删成功的才清记录；没删掉的仍旧留在"待恢复"里（用户还能恢复或再试）
+            setDisabled(c, kept);
+            try {
+                String specs = c.getSharedPreferences(PhoneBridge.PREFS, Context.MODE_PRIVATE)
+                        .getString(KEY_DISABLED_SPECS, "{}");
+                org.json.JSONObject sj = new org.json.JSONObject(specs);
+                for (String x : purged) sj.remove(x);
+                c.getSharedPreferences(PhoneBridge.PREFS, Context.MODE_PRIVATE).edit()
+                        .putString(KEY_DISABLED_SPECS, sj.toString()).apply();
+            } catch (Throwable ignore) { }
+            // profile 里也只抹掉真的删掉了的那些
+            try {
+                File f = profilePkg(c);
+                if (f.exists()) {
+                    org.json.JSONObject o = new org.json.JSONObject(readText(f));
+                    org.json.JSONObject dsh = o.optJSONObject("dsh");
+                    org.json.JSONObject prof = dsh == null ? null : dsh.optJSONObject("profile");
+                    org.json.JSONArray b = prof == null ? null : prof.optJSONArray("bundles");
+                    if (b != null) {
+                        org.json.JSONArray nb = new org.json.JSONArray();
+                        for (int i = 0; i < b.length(); i++) {
+                            if (!purged.contains(b.optString(i))) nb.put(b.optString(i));
+                        }
+                        prof.put("bundles", nb);
+                    }
+                    org.json.JSONObject deps = o.optJSONObject("dependencies");
+                    if (deps != null) for (String n : purged) deps.remove(n);
+                    try (OutputStream os = new FileOutputStream(f)) {
+                        os.write(o.toString(2).getBytes(StandardCharsets.UTF_8));
+                    }
+                }
+            } catch (Throwable ignore) { }
+        } catch (Throwable t) {
+            android.util.Log.w("DSH_SAFEMODE", "彻底删除失败", t);
+        }
+        return purged.size();
+    }
+
+    public static void report(Context c, String line) {
+        if (line == null || line.isEmpty()) return;
+        synchronized (Env.class) {
+            try (OutputStream os = new FileOutputStream(new File(base(c), "report.txt"), true)) {
+                os.write(line.getBytes(StandardCharsets.UTF_8));
+            } catch (Throwable ignore) {
+                // 报告写不进去不能影响主流程（磁盘满、目录被删都可能）
+            }
+        }
     }
 
     /**
@@ -819,8 +1146,23 @@ public final class Env {
                 }
             }
             try {
-                c.getSharedPreferences(PhoneBridge.PREFS, Context.MODE_PRIVATE).edit()
-                        .putString(KEY_DISABLED_SPECS, new org.json.JSONObject(specs).toString()).apply();
+                /*
+                 * ⚠️ 这里是**合并**写回，不是覆盖：
+                 * 早先的写法是 `putString(KEY_DISABLED_SPECS, new JSONObject(specs))`，
+                 * 于是第二次停用（例如先自动停了一个、用户又手动进了一次安全模式）
+                 * 会把上一批的依赖声明冲掉。恢复时 dependencies 写不回去，
+                 * 插件目录挪回来了、pnpm 却认为它没装 —— "恢复了但还是坏的"。
+                 */
+                android.content.SharedPreferences sp =
+                        c.getSharedPreferences(PhoneBridge.PREFS, Context.MODE_PRIVATE);
+                org.json.JSONObject merged = new org.json.JSONObject();
+                try {
+                    merged = new org.json.JSONObject(sp.getString(KEY_DISABLED_SPECS, "{}"));
+                } catch (Throwable ignore2) { merged = new org.json.JSONObject(); }
+                for (java.util.Map.Entry<String, String> e : specs.entrySet()) {
+                    merged.put(e.getKey(), e.getValue());
+                }
+                sp.edit().putString(KEY_DISABLED_SPECS, merged.toString()).apply();
             } catch (Throwable ignore) { }
             // 缩进写回，保持和 pnpm/dsh 自己写出来的格式一致（便于用户自己看）
             try (OutputStream os = new FileOutputStream(f)) {
@@ -956,9 +1298,9 @@ public final class Env {
             reader.setDaemon(true);
             reader.start();
 
-            boolean done = p.waitFor(PLUGIN_INSTALL_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+            boolean done = Proc.waitFor(p, PLUGIN_INSTALL_TIMEOUT_MS);
             if (!done) {
-                p.destroyForcibly();
+                Proc.killForcibly(p);
                 return "装 pnpm 超时，插件市场暂时不可用（其它功能不受影响）";
             }
             reader.join(2000);
@@ -973,14 +1315,67 @@ public final class Env {
         }
     }
 
-    private static void deleteRecursively(File f) {
-        if (f == null || !f.exists()) return;
+    /**
+     * 删除文件/目录，**绝不跟进符号链接**。
+     *
+     * <h3>为什么必须这样（这是"彻底删除"按钮的安全底线）</h3>
+     * pnpm / npm 的 node_modules 里大量使用符号链接：
+     * <ul>
+     *   <li>{@code node_modules/<包名>} 往往是指向 {@code .pnpm/<包名>@<版本>/...} 的**链接**；</li>
+     *   <li>{@code .pnpm/<包名>@<版本>/node_modules/} 里，每个依赖又是一个指向**别的**包目录的链接。</li>
+     * </ul>
+     * 而 {@link File#isDirectory()} 对"指向目录的链接"返回 true —— 于是天真的递归删除
+     * 会**跟进链接、把链接目标里的真实文件删掉**：轻则删掉别的包（pnpm 商店被删花），
+     * 重则删掉 {@code file:../xxx} 这种链接指向的用户自己的目录。
+     *
+     * <p>所以这里先判断"这一项本身是不是链接"（{@code Os.lstat}，API 21+，O(1)），
+     * 是链接就只删链接本身；不是才往下递归。
+     */
+    public static void deleteRecursively(File f) {
+        if (f == null) return;
+        if (isSymlink(f)) {
+            //noinspection ResultOfMethodCallIgnored
+            f.delete();                 // 只摘掉链接，不碰目标
+            return;
+        }
+        if (!f.exists()) return;
         if (f.isDirectory()) {
             File[] kids = f.listFiles();
             if (kids != null) for (File k : kids) deleteRecursively(k);
         }
         //noinspection ResultOfMethodCallIgnored
         f.delete();
+    }
+
+    /**
+     * 这一项本身是不是符号链接（不看它指向谁）。
+     *
+     * <p>用 {@code Os.lstat} 而不是 {@code File.isDirectory()/exists()}：
+     * 后两者都会**跟进**链接，判断不出"这是个链接"。
+     * 也不能用 {@code java.nio.file.Files.isSymbolicLink} —— 那是 API 26+，
+     * 而本 App 的 minSdk 是 24。
+     */
+    private static boolean isSymlink(File f) {
+        try {
+            android.system.StructStat st = android.system.Os.lstat(f.getAbsolutePath());
+            return android.system.OsConstants.S_ISLNK(st.st_mode);
+        } catch (Throwable t) {
+            return false;               // 问不出来就当它不是链接，按普通文件走
+        }
+    }
+
+    /**
+     * 这个字符串像不像一个 npm 包名（用于"彻底删除"前的基本校验）。
+     *
+     * <p>包名来自 profile 的 {@code bundles}，而那是**插件自己也能写**的地方。
+     * 删除是不可逆操作，所以先挡掉 {@code ..}、绝对路径、反斜杠这类东西 ——
+     * 免得一个畸形（或恶意）的包名把删除带到 node_modules 之外去。
+     */
+    private static boolean looksLikePackageName(String n) {
+        if (n == null || n.isEmpty() || n.length() > 200) return false;
+        if (n.contains("..") || n.contains("\\") || n.contains("\u0000")) return false;
+        if (n.startsWith("/") || n.startsWith(".")) return false;
+        return n.matches("@?[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)?");
     }
 
     /** 插件安装最多等这么久（留给将来可能恢复的 pnpm 路径）。 */
@@ -1027,6 +1422,16 @@ public final class Env {
 
             //noinspection ResultOfMethodCallIgnored
             new File(rootfs, "run/dsh-phone").mkdirs();
+
+            /*
+             * 虚拟屏守护的 token 也放一份进容器（/run/dsh-vsd/token）。
+             *
+             * 为什么要放：容器里的 DSH 插件要直连 127.0.0.1:18240 取帧/点按，
+             * 而那个守护从 0.3.2 起**每个请求都校验 X-Token**（原来是绑所有网卡 + 零鉴权）。
+             * token 本身不含任何外部凭据，只是一个"访问本机回环"的口令；
+             * 每次容器启动重写一次，用户清过容器也不会丢。
+             */
+            VScreen.writeContainerToken(c, base);
 
             /*
              * 工作区里也放一份 AGENTS.md。

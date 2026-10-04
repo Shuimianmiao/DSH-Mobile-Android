@@ -44,7 +44,8 @@ public class IconActivity extends Activity {
                 + "· 切换后系统会重启一下 App（组件状态变了，躲不掉），桌面图标随即更新\n"
                 + "· 如果桌面上原来那个图标没变，删掉重新拖一个就好\n\n"
                 + "说明：Android 不允许 App 用**任意图片**当桌面图标（图标必须是打包进 APK 的资源），\n"
-                + "所以这里提供的是一套预置配色 —— 同一只鲸鱼，换背景色。");
+                + "所以图片得由开发者预先收进安装包。「uu们添加的图标」就是群里大家发来的图，\n"
+                + "想加自己的图，把图片发给开发者即可（加进去之后这里会多一个）。");
         root.addView(tip);
 
         List<IconSwitcher.Variant> all = IconSwitcher.all(this);
@@ -52,16 +53,35 @@ public class IconActivity extends Activity {
 
         int perRow = 4;
         LinearLayout row = null;
+        String lastGroup = null;
         for (int i = 0; i < all.size(); i++) {
-            if (i % perRow == 0) {
+            IconSwitcher.Variant v = all.get(i);
+            // 分组小标题：第一组直接排，换组时插一行标题并强制换行
+            if (!v.group.equals(lastGroup)) {
+                lastGroup = v.group;
+                row = null;
+                root.addView(groupTitle(v.group, pad));
+            }
+            if (row == null) {
                 row = new LinearLayout(this);
                 row.setOrientation(LinearLayout.HORIZONTAL);
                 root.addView(row);
             }
-            row.addView(buildCell(all.get(i), cur, pad));
+            row.addView(buildCell(v, cur, pad));
+            if ((i + 1) % perRow == 0) row = null;
         }
 
         setContentView(scroll);
+    }
+
+    /** 一组的小标题。 */
+    private View groupTitle(String name, int pad) {
+        TextView t = new TextView(this);
+        t.setText(name);
+        t.setTextSize(13f);
+        t.setTextColor(Ui.SUB);
+        t.setPadding(0, pad, 0, pad / 2);
+        return t;
     }
 
     private View buildCell(final IconSwitcher.Variant v, IconSwitcher.Variant cur, int pad) {
@@ -95,9 +115,11 @@ public class IconActivity extends Activity {
             Toast.makeText(this, "现在用的就是「" + v.label + "」", Toast.LENGTH_SHORT).show();
             return;
         }
+        // 用词跟着分组走：配色是"这套配色"，用户投稿的图是"这张图"
+        boolean pic = IconSwitcher.GROUP_UU.equals(v.group);
         new AlertDialog.Builder(this)
                 .setTitle("换成「" + v.label + "」？")
-                .setMessage("桌面图标和通知栏图标都会换成这套配色。\n\n"
+                .setMessage("桌面图标和通知栏图标都会换成" + (pic ? "这张图" : "这套配色") + "。\n\n"
                         + "切换时 App 会重启一下（系统的要求），几秒后桌面图标就更新了。\n"
                         + "会话、API Key、插件、白名单都不受影响。")
                 .setPositiveButton("换", (d, w) -> {

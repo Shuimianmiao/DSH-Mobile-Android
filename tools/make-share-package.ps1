@@ -11,8 +11,8 @@
 #   分享\*.md 分享\img 分享\shizuku
 #
 # 产出:
-#   分享\DeepSeek-Harness-<Version>.apk
-#   分享\DeepSeek-Harness-<Version>-分享包.zip
+#   分享\Tdsh-<Version>.apk
+#   分享\Tdsh-<Version>-分享包.zip
 
 param(
     [Parameter(Mandatory = $true)][string]$Version
@@ -21,8 +21,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $share = Join-Path $root '分享'
-$apkName = "DeepSeek-Harness-$Version.apk"
-$zip = Join-Path $share "DeepSeek-Harness-$Version-分享包.zip"
+$apkName = "Tdsh-$Version.apk"
+$zip = Join-Path $share "Tdsh-$Version-分享包.zip"
 
 Write-Host '── 1/4 取 release APK ──'
 $built = Join-Path $root 'DshMobile\app\build\outputs\apk\release\app-release.apk'

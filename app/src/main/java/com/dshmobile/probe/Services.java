@@ -382,7 +382,7 @@ public final class Services {
             }, "dsh-svc-out");
             reader.setDaemon(true);
             reader.start();
-            if (!p.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            if (!Proc.waitFor(p, timeoutMs)) {
                 p.destroy();
                 Log.w(TAG, "容器命令超时");
                 return null;
