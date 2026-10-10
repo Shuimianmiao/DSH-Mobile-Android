@@ -10,10 +10,21 @@ jobs:
       with:
         java-version: '17'
         distribution: 'temurin'
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+      with:
+        api-level: 36
+        build-tools: 36.0.0
+    - name: Build Plugins
+      run: |
+        for d in dsh-shell-termux dsh-client-ui-responsive plugins/dsh-android-bridge plugins/dsh-android-manage plugins/dsh-android-linux-env plugins/dsh-android-file-open plugins/dsh-model-capability; do
+          echo "Building $d..."
+          (cd "$d" && npm ci --no-audit --no-fund && npm run build)
+        done
     - name: Grant execute permission for gradlew
       run: chmod +x ./gradlew
     - name: Build with Gradle
-      run: ./gradlew assembleDebug
+      run: ./gradlew assembleDebug --stacktrace
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
